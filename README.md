@@ -139,6 +139,11 @@ for, so looking further back is a wider query rather than a longer memory, and
 every number on the board is the HIS's own. The range buttons go to a year; past
 that the report is slower than anyone will wait.
 
+The board opens on `days_back` from `data/his_config.json` — 1 by default, which
+is yesterday and today. The range buttons override that for this PC and the
+choice is remembered in `data/view.json`, so the setting is what a fresh PC
+starts on rather than what it is stuck with.
+
 The cost is that a wide span is a slow fetch. If a year turns out to take too
 long to sit behind the same Refresh as a day, the fix is to move the long ranges
 onto a button of their own rather than to start keeping a copy.
@@ -176,8 +181,27 @@ twelve seconds to come back. On a PC with neither Edge nor Chrome the dashboard
 falls back to the browser used for links, and then only closing the *page* stops
 it, not the browser.
 
+## Building the executable
+
 `BUILD.bat` / `BUILD.sh` produce the single-file executable; `reports/` is
 bundled with `templates/` and `static/`.
+
+It is also built for you. **Build the Windows executable** runs on every push
+and pull request and leaves `LabKPIs.exe` as a downloadable artifact on the run
+— so installing it on a PC is a download, and a pull request can be tried out
+before it is merged. The workflow runs `BUILD.bat` itself rather than keeping
+its own copy of the flags, so the two cannot drift apart; that script's closing
+`pause` is skipped when `CI` is set, which it always is on a runner and never is
+when somebody double-clicks it.
+
+Building is not the whole check. A forgotten `--add-data` still produces an
+`.exe`, and only shows itself when the thing is started and cannot find its
+templates or its report bodies — so the workflow starts the executable it just
+built, waits for it to serve its page, and asks it whether it can still see
+`samples_received`.
+
+Tagging a version (`git tag v1.0 && git push --tags`) publishes the executable
+as a GitHub release.
 
 ## Still to do
 

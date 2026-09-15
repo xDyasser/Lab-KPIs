@@ -132,26 +132,33 @@ store = {
 
 # What the viewer is looking at. A span in days rather than two dates, so the
 # board still covers today after midnight.
+#
+# The span the board opens on belongs to the HIS settings — days_back there is
+# the one place to change it — and what the viewer picks with the range buttons
+# then overrides it for this PC.
 view = {
-    'days_back': 7,
-    'days_ahead': 0,
+    'days_back': his_client.DEFAULT_CONFIG['days_back'],
+    'days_ahead': his_client.DEFAULT_CONFIG['days_ahead'],
     'site': '',        # '' means every site
     'department': '',
 }
 
 
 def load_view():
-    if not os.path.exists(VIEW_FILE):
-        return
-    try:
-        with open(VIEW_FILE, 'r', encoding='utf-8') as f:
-            saved = json.load(f)
-    except Exception as e:
-        print(f"[!] Could not read {VIEW_FILE}: {e}")
-        return
-    for key in view:
-        if key in saved:
-            view[key] = saved[key]
+    config = his['client'].config
+    view['days_back'] = config['days_back']
+    view['days_ahead'] = config['days_ahead']
+
+    if os.path.exists(VIEW_FILE):
+        try:
+            with open(VIEW_FILE, 'r', encoding='utf-8') as f:
+                saved = json.load(f)
+        except Exception as e:
+            print(f"[!] Could not read {VIEW_FILE}: {e}")
+            saved = {}
+        for key in view:
+            if key in saved:
+                view[key] = saved[key]
     clean_view()
 
 
@@ -164,11 +171,12 @@ def save_view():
 
 
 def clean_view():
-    for key, fallback in (('days_back', 7), ('days_ahead', 0)):
+    config = his['client'].config
+    for key in ('days_back', 'days_ahead'):
         try:
             view[key] = int(view[key])
         except (TypeError, ValueError):
-            view[key] = fallback
+            view[key] = config[key]
     # A year is already a slow query; beyond that the report times out and the
     # dashboard looks broken rather than busy.
     view['days_back'] = max(0, min(view['days_back'], 366))
