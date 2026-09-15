@@ -1053,9 +1053,14 @@ def fetch_and_report():
         print(f"[*] HIS fetch: {count} rows in {his['last_duration']}s "
               f"at {his['last_fetch']}")
     except HISCancelled:
-        # The viewer moved the dates or signed out. Nothing went wrong, and the
-        # fetch that overtook this one is already saying what is happening.
-        print('[*] HIS fetch overtaken — stopping it.')
+        # Two different things end a fetch this way and they want telling apart:
+        # a newer fetch took over (nothing went wrong, and that fetch is already
+        # saying what is happening), or the session ended under it — which reads
+        # as "overtaken" but leaves nobody fetching at all.
+        if not his['logged_in']:
+            print('[*] HIS fetch stopped — the session ended under it. Sign in again.')
+        else:
+            print('[*] HIS fetch overtaken by a newer one — stopping it.')
     except HISAuthError as e:
         his['logged_in'] = False
         his['client'].logout()
