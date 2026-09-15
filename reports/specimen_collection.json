@@ -1,0 +1,330 @@
+{
+  "_comment": [
+    "Report 961 — 'SAMPLE COLLECTION REPORT SPECIMEN' (LIS).",
+    "Captured from the portal's own GetReportData request, unchanged apart from",
+    "the two dates and loginUserId, which the server fills in per request.",
+    "Joined onto the samples received by SAMPLE_NO: it is what the sample was",
+    "drawn into — SPECIMEN_TYPE, CONTAINER — and how urgent the collection was.",
+    "Its CATEGORY, LOCATION and DEPARTMENT_NAME filters are left at '%' (all).",
+    "Re-capture it the same way if the HIS ever changes the report's filters."
+  ],
+  "_meta": {
+    "title": "Specimen collection",
+    "key_column": "SAMPLE_NO",
+    "date_filters": {
+      "from": "FROM_DATE",
+      "to": "TO_DATE"
+    }
+  },
+  "getReportFilters": [
+    {
+      "controlTypeId": 0,
+      "displayOrder": 1,
+      "genReportListId": 961,
+      "genReportListParamsId": 3852,
+      "isMandatory": true,
+      "isParam": 1,
+      "keyField": null,
+      "maxLength": 0,
+      "paramsQueryTypeId": 0,
+      "spName": null,
+      "spParamsName": "FROM_DATE",
+      "spParamsTypeId": 0,
+      "valueField": null,
+      "spParamsStatus": 0,
+      "queryString": null,
+      "mainSpName": null,
+      "labelName": "FROM_DATE",
+      "dataSource": null,
+      "storedValue": "",
+      "paramPosition": 0,
+      "parameterSelectionData": null,
+      "isHospital": 0,
+      "relationParamName": null,
+      "relationParamId": 0,
+      "relationParamField": null,
+      "toParamField": null,
+      "isVisible": 1,
+      "isRelationMandatory": 0,
+      "storedValueText": ""
+    },
+    {
+      "controlTypeId": 0,
+      "displayOrder": 2,
+      "genReportListId": 961,
+      "genReportListParamsId": 3853,
+      "isMandatory": true,
+      "isParam": 1,
+      "keyField": null,
+      "maxLength": 0,
+      "paramsQueryTypeId": 0,
+      "spName": null,
+      "spParamsName": "TO_DATE",
+      "spParamsTypeId": 0,
+      "valueField": null,
+      "spParamsStatus": 0,
+      "queryString": null,
+      "mainSpName": null,
+      "labelName": "TO_DATE",
+      "dataSource": null,
+      "storedValue": "",
+      "paramPosition": 0,
+      "parameterSelectionData": null,
+      "isHospital": 0,
+      "relationParamName": null,
+      "relationParamId": 0,
+      "relationParamField": null,
+      "toParamField": null,
+      "isVisible": 1,
+      "isRelationMandatory": 0,
+      "storedValueText": ""
+    },
+    {
+      "controlTypeId": 3,
+      "displayOrder": 3,
+      "genReportListId": 961,
+      "genReportListParamsId": 3854,
+      "isMandatory": true,
+      "isParam": 1,
+      "keyField": "Key",
+      "maxLength": 0,
+      "paramsQueryTypeId": 2,
+      "spName": null,
+      "spParamsName": "CATEGORY",
+      "spParamsTypeId": 1,
+      "valueField": "Value",
+      "spParamsStatus": 0,
+      "queryString": null,
+      "mainSpName": null,
+      "labelName": " CATEGORY ",
+      "dataSource": "[{\"Key\":\"%\",\"Value\":\"%\"},{\"Key\":\"Chemistry\",\"Value\":\"Chemistry\"},{\"Key\":\"Cytology\",\"Value\":\"Cytology\"},{\"Key\":\"Hematology Lab\",\"Value\":\"Hematology Lab\"},{\"Key\":\"Histology\",\"Value\":\"Histology\"},{\"Key\":\"Microbiology\",\"Value\":\"Microbiology\"},{\"Key\":\"Referal Lab\",\"Value\":\"Referal Lab\"},{\"Key\":\"Microscopy\",\"Value\":\"Microscopy\"},{\"Key\":\"Molecular Lab\",\"Value\":\"Molecular Lab\"},{\"Key\":\"Blood Bank\",\"Value\":\"Blood Bank\"},{\"Key\":\"EMPLOYEE HEALTH CHECK\",\"Value\":\"EMPLOYEE HEALTH CHECK\"}]",
+      "storedValue": "%",
+      "paramPosition": 0,
+      "parameterSelectionData": [
+        {
+          "key": "%",
+          "value": "%"
+        },
+        {
+          "key": "Blood Bank",
+          "value": "Blood Bank"
+        },
+        {
+          "key": "Chemistry",
+          "value": "Chemistry"
+        },
+        {
+          "key": "Cytology",
+          "value": "Cytology"
+        },
+        {
+          "key": "EMPLOYEE HEALTH CHECK",
+          "value": "EMPLOYEE HEALTH CHECK"
+        },
+        {
+          "key": "Hematology Lab",
+          "value": "Hematology Lab"
+        },
+        {
+          "key": "Histology",
+          "value": "Histology"
+        },
+        {
+          "key": "Microbiology",
+          "value": "Microbiology"
+        },
+        {
+          "key": "Microscopy",
+          "value": "Microscopy"
+        },
+        {
+          "key": "Molecular Lab",
+          "value": "Molecular Lab"
+        },
+        {
+          "key": "Referal Lab",
+          "value": "Referal Lab"
+        }
+      ],
+      "isHospital": 0,
+      "relationParamName": null,
+      "relationParamId": 0,
+      "relationParamField": null,
+      "toParamField": null,
+      "isVisible": 1,
+      "isRelationMandatory": 0,
+      "filteredParameterSelectionData": [
+        {
+          "key": "%",
+          "value": "%"
+        },
+        {
+          "key": "Blood Bank",
+          "value": "Blood Bank"
+        },
+        {
+          "key": "Chemistry",
+          "value": "Chemistry"
+        },
+        {
+          "key": "Cytology",
+          "value": "Cytology"
+        },
+        {
+          "key": "EMPLOYEE HEALTH CHECK",
+          "value": "EMPLOYEE HEALTH CHECK"
+        },
+        {
+          "key": "Hematology Lab",
+          "value": "Hematology Lab"
+        },
+        {
+          "key": "Histology",
+          "value": "Histology"
+        },
+        {
+          "key": "Microbiology",
+          "value": "Microbiology"
+        },
+        {
+          "key": "Microscopy",
+          "value": "Microscopy"
+        },
+        {
+          "key": "Molecular Lab",
+          "value": "Molecular Lab"
+        },
+        {
+          "key": "Referal Lab",
+          "value": "Referal Lab"
+        }
+      ],
+      "storedValueText": "%"
+    },
+    {
+      "controlTypeId": 3,
+      "displayOrder": 4,
+      "genReportListId": 961,
+      "genReportListParamsId": 3855,
+      "isMandatory": true,
+      "isParam": 1,
+      "keyField": "Key",
+      "maxLength": 0,
+      "paramsQueryTypeId": 2,
+      "spName": null,
+      "spParamsName": "LOCATION",
+      "spParamsTypeId": 1,
+      "valueField": "Value",
+      "spParamsStatus": 0,
+      "queryString": null,
+      "mainSpName": null,
+      "labelName": " LOCATION ",
+      "dataSource": "[{\"Key\":\"%\",\"Value\":\"%\"},{\"Key\":\"OP\",\"Value\":\"OP\"},{\"Key\":\"ER\",\"Value\":\"ER\"},{\"Key\":\"IP\",\"Value\":\"IP\"}]",
+      "storedValue": "%",
+      "paramPosition": 0,
+      "parameterSelectionData": [
+        {
+          "key": "%",
+          "value": "%"
+        },
+        {
+          "key": "ER",
+          "value": "ER"
+        },
+        {
+          "key": "IP",
+          "value": "IP"
+        },
+        {
+          "key": "OP",
+          "value": "OP"
+        }
+      ],
+      "isHospital": 0,
+      "relationParamName": null,
+      "relationParamId": 0,
+      "relationParamField": null,
+      "toParamField": null,
+      "isVisible": 1,
+      "isRelationMandatory": 0,
+      "filteredParameterSelectionData": [
+        {
+          "key": "%",
+          "value": "%"
+        },
+        {
+          "key": "ER",
+          "value": "ER"
+        },
+        {
+          "key": "IP",
+          "value": "IP"
+        },
+        {
+          "key": "OP",
+          "value": "OP"
+        }
+      ],
+      "storedValueText": "%"
+    },
+    {
+      "controlTypeId": 1,
+      "displayOrder": 5,
+      "genReportListId": 961,
+      "genReportListParamsId": 3856,
+      "isMandatory": true,
+      "isParam": 1,
+      "keyField": "Key",
+      "maxLength": 0,
+      "paramsQueryTypeId": 2,
+      "spName": null,
+      "spParamsName": "DEPARTMENT_NAME",
+      "spParamsTypeId": 1,
+      "valueField": "Value",
+      "spParamsStatus": 0,
+      "queryString": null,
+      "mainSpName": null,
+      "labelName": "DEPARTMENT_NAME",
+      "dataSource": "[{\"Key\":\"%\",\"Value\":\"%\"}]",
+      "storedValue": "%",
+      "paramPosition": 0,
+      "parameterSelectionData": [
+        {
+          "key": "%",
+          "value": "%"
+        }
+      ],
+      "isHospital": 0,
+      "relationParamName": null,
+      "relationParamId": 0,
+      "relationParamField": null,
+      "toParamField": null,
+      "isVisible": 1,
+      "isRelationMandatory": 0,
+      "storedValueText": "%"
+    }
+  ],
+  "genReportListId": 961,
+  "subReportId": 0,
+  "reportName": "SAMPLE COLLECTION REPORT SPECIMEN",
+  "reportTypeId": 3,
+  "moduleId": 30,
+  "categoryId": 69,
+  "displayOrder": 0,
+  "rptPrivilegeName": null,
+  "queryType": 3,
+  "queryString": null,
+  "spName": null,
+  "reportType": "ReportManger",
+  "moduleName": "Report Manger",
+  "categoryName": "LIS",
+  "description": null,
+  "isValid": true,
+  "isFilterRequired": 1,
+  "isTableDisplayRequired": 1,
+  "reportUniqueId": 0,
+  "classificationType": null,
+  "hospitalId": 4,
+  "genReportListReportsId": 1063,
+  "loginUserId": ""
+}

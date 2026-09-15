@@ -1,0 +1,352 @@
+{
+  "_comment": [
+    "Report 593 — 'LAB Result Time' (Lab Census Report).",
+    "Captured from the portal's own GetReportData request, unchanged apart from",
+    "the two dates and loginUserId, which the server fills in per request.",
+    "Two things here are not like the other reports: its date parameters are",
+    "named 'From Date' and 'To Date' with spaces, and it calls the sample",
+    "LIS_SAMPLE_NO — both are spelled out in _meta so the join still lands.",
+    "Its Visit Type, Category Name and Service Name filters are left at '%'.",
+    "Its rows are per analyte — finer than a test — so the analyte columns are",
+    "skipped and only the sample's own times are joined on.",
+    "Re-capture it the same way if the HIS ever changes the report's filters."
+  ],
+  "_meta": {
+    "title": "Lab result time",
+    "key_column": "LIS_SAMPLE_NO",
+    "date_filters": {
+      "from": "From Date",
+      "to": "To Date"
+    },
+    "skip_columns": [
+      "SERVICE_NAME",
+      "RESULT",
+      "RESULT_UNIT"
+    ]
+  },
+  "getReportFilters": [
+    {
+      "controlTypeId": 0,
+      "displayOrder": 1,
+      "genReportListId": 593,
+      "genReportListParamsId": 2523,
+      "isMandatory": true,
+      "isParam": 1,
+      "keyField": null,
+      "maxLength": 0,
+      "paramsQueryTypeId": 0,
+      "spName": null,
+      "spParamsName": "From Date",
+      "spParamsTypeId": 0,
+      "valueField": null,
+      "spParamsStatus": 0,
+      "queryString": null,
+      "mainSpName": null,
+      "labelName": "From Date",
+      "dataSource": null,
+      "storedValue": "",
+      "paramPosition": 0,
+      "parameterSelectionData": null,
+      "isHospital": 0,
+      "relationParamName": null,
+      "relationParamId": 0,
+      "relationParamField": null,
+      "toParamField": null,
+      "isVisible": 1,
+      "isRelationMandatory": 0,
+      "storedValueText": ""
+    },
+    {
+      "controlTypeId": 0,
+      "displayOrder": 2,
+      "genReportListId": 593,
+      "genReportListParamsId": 2524,
+      "isMandatory": true,
+      "isParam": 1,
+      "keyField": null,
+      "maxLength": 0,
+      "paramsQueryTypeId": 0,
+      "spName": null,
+      "spParamsName": "To Date",
+      "spParamsTypeId": 0,
+      "valueField": null,
+      "spParamsStatus": 0,
+      "queryString": null,
+      "mainSpName": null,
+      "labelName": "To Date",
+      "dataSource": null,
+      "storedValue": "",
+      "paramPosition": 0,
+      "parameterSelectionData": null,
+      "isHospital": 0,
+      "relationParamName": null,
+      "relationParamId": 0,
+      "relationParamField": null,
+      "toParamField": null,
+      "isVisible": 1,
+      "isRelationMandatory": 0,
+      "storedValueText": ""
+    },
+    {
+      "controlTypeId": 3,
+      "displayOrder": 3,
+      "genReportListId": 593,
+      "genReportListParamsId": 2525,
+      "isMandatory": true,
+      "isParam": 1,
+      "keyField": "Key",
+      "maxLength": 0,
+      "paramsQueryTypeId": 2,
+      "spName": null,
+      "spParamsName": "Visit Type",
+      "spParamsTypeId": 1,
+      "valueField": "Value",
+      "spParamsStatus": 0,
+      "queryString": null,
+      "mainSpName": null,
+      "labelName": "Visit Type",
+      "dataSource": "[{\"Key\":\"%\",\"Value\":\"%\"},{\"Key\":\"IP\",\"Value\":\"IP\"},{\"Key\":\"OP\",\"Value\":\"OP\"},{\"Key\":\"ER\",\"Value\":\"ER\"}]",
+      "storedValue": "%",
+      "paramPosition": 0,
+      "parameterSelectionData": [
+        {
+          "key": "%",
+          "value": "%"
+        },
+        {
+          "key": "ER",
+          "value": "ER"
+        },
+        {
+          "key": "IP",
+          "value": "IP"
+        },
+        {
+          "key": "OP",
+          "value": "OP"
+        }
+      ],
+      "isHospital": 0,
+      "relationParamName": null,
+      "relationParamId": 0,
+      "relationParamField": null,
+      "toParamField": null,
+      "isVisible": 1,
+      "isRelationMandatory": 0,
+      "filteredParameterSelectionData": [
+        {
+          "key": "%",
+          "value": "%"
+        },
+        {
+          "key": "ER",
+          "value": "ER"
+        },
+        {
+          "key": "IP",
+          "value": "IP"
+        },
+        {
+          "key": "OP",
+          "value": "OP"
+        }
+      ],
+      "storedValueText": "%"
+    },
+    {
+      "controlTypeId": 3,
+      "displayOrder": 4,
+      "genReportListId": 593,
+      "genReportListParamsId": 2526,
+      "isMandatory": true,
+      "isParam": 1,
+      "keyField": "Key",
+      "maxLength": 0,
+      "paramsQueryTypeId": 2,
+      "spName": null,
+      "spParamsName": "Category Name",
+      "spParamsTypeId": 1,
+      "valueField": "Value",
+      "spParamsStatus": 0,
+      "queryString": null,
+      "mainSpName": null,
+      "labelName": "Category Name",
+      "dataSource": "[{\"Key\":\"%\",\"Value\":\"%\"},{\"Key\":\"Chemistry\",\"Value\":\"Chemistry\"},{\"Key\":\"Blood Bank\",\"Value\":\"Blood Bank\"},{\"Key\":\"Cytology\",\"Value\":\"Cytology\"},{\"Key\":\"Hematology Lab\",\"Value\":\"Hematology Lab\"},{\"Key\":\"Histology\",\"Value\":\"Histology\"},{\"Key\":\"Microbiology\",\"Value\":\"Microbiology\"},{\"Key\":\"Referal Lab\",\"Value\":\"Referal Lab\"},{\"Key\":\"Respiratory\",\"Value\":\"Respiratory\"},{\"Key\":\"Molecular Lab\",\"Value\":\"Molecular Lab\"},{\"Key\":\"EMPLOYEE HEALTH CHECK\",\"Value\":\"EMPLOYEE HEALTH CHECK\"}]",
+      "storedValue": "%",
+      "paramPosition": 0,
+      "parameterSelectionData": [
+        {
+          "key": "%",
+          "value": "%"
+        },
+        {
+          "key": "Blood Bank",
+          "value": "Blood Bank"
+        },
+        {
+          "key": "Chemistry",
+          "value": "Chemistry"
+        },
+        {
+          "key": "Cytology",
+          "value": "Cytology"
+        },
+        {
+          "key": "EMPLOYEE HEALTH CHECK",
+          "value": "EMPLOYEE HEALTH CHECK"
+        },
+        {
+          "key": "Hematology Lab",
+          "value": "Hematology Lab"
+        },
+        {
+          "key": "Histology",
+          "value": "Histology"
+        },
+        {
+          "key": "Microbiology",
+          "value": "Microbiology"
+        },
+        {
+          "key": "Molecular Lab",
+          "value": "Molecular Lab"
+        },
+        {
+          "key": "Referal Lab",
+          "value": "Referal Lab"
+        },
+        {
+          "key": "Respiratory",
+          "value": "Respiratory"
+        }
+      ],
+      "isHospital": 0,
+      "relationParamName": null,
+      "relationParamId": 0,
+      "relationParamField": null,
+      "toParamField": null,
+      "isVisible": 1,
+      "isRelationMandatory": 0,
+      "filteredParameterSelectionData": [
+        {
+          "key": "%",
+          "value": "%"
+        },
+        {
+          "key": "Blood Bank",
+          "value": "Blood Bank"
+        },
+        {
+          "key": "Chemistry",
+          "value": "Chemistry"
+        },
+        {
+          "key": "Cytology",
+          "value": "Cytology"
+        },
+        {
+          "key": "EMPLOYEE HEALTH CHECK",
+          "value": "EMPLOYEE HEALTH CHECK"
+        },
+        {
+          "key": "Hematology Lab",
+          "value": "Hematology Lab"
+        },
+        {
+          "key": "Histology",
+          "value": "Histology"
+        },
+        {
+          "key": "Microbiology",
+          "value": "Microbiology"
+        },
+        {
+          "key": "Molecular Lab",
+          "value": "Molecular Lab"
+        },
+        {
+          "key": "Referal Lab",
+          "value": "Referal Lab"
+        },
+        {
+          "key": "Respiratory",
+          "value": "Respiratory"
+        }
+      ],
+      "storedValueText": "%"
+    },
+    {
+      "controlTypeId": 3,
+      "displayOrder": 5,
+      "genReportListId": 593,
+      "genReportListParamsId": 2527,
+      "isMandatory": true,
+      "isParam": 1,
+      "keyField": "Key",
+      "maxLength": 0,
+      "paramsQueryTypeId": 2,
+      "spName": null,
+      "spParamsName": "Service Name",
+      "spParamsTypeId": 1,
+      "valueField": "Value",
+      "spParamsStatus": 0,
+      "queryString": null,
+      "mainSpName": null,
+      "labelName": "Service Name",
+      "dataSource": "[{\"Key\":\"%\",\"Value\":\"%\"},{\"Key\":\"ASSAY OF TROPONIN, QUANTITATIVE\",\"Value\":\"ASSAY OF TROPONIN, QUANTITATIVE\"}]",
+      "storedValue": "%",
+      "paramPosition": 0,
+      "parameterSelectionData": [
+        {
+          "key": "%",
+          "value": "%"
+        },
+        {
+          "key": "ASSAY OF TROPONIN, QUANTITATIVE",
+          "value": "ASSAY OF TROPONIN, QUANTITATIVE"
+        }
+      ],
+      "isHospital": 0,
+      "relationParamName": null,
+      "relationParamId": 0,
+      "relationParamField": null,
+      "toParamField": null,
+      "isVisible": 1,
+      "isRelationMandatory": 0,
+      "filteredParameterSelectionData": [
+        {
+          "key": "%",
+          "value": "%"
+        },
+        {
+          "key": "ASSAY OF TROPONIN, QUANTITATIVE",
+          "value": "ASSAY OF TROPONIN, QUANTITATIVE"
+        }
+      ],
+      "storedValueText": "%"
+    }
+  ],
+  "genReportListId": 593,
+  "subReportId": 0,
+  "reportName": "LAB Result Time",
+  "reportTypeId": 3,
+  "moduleId": 30,
+  "categoryId": 76,
+  "displayOrder": 1,
+  "rptPrivilegeName": null,
+  "queryType": 3,
+  "queryString": null,
+  "spName": null,
+  "reportType": "ReportManger",
+  "moduleName": "Report Manger",
+  "categoryName": "Lab Census Report",
+  "description": "for Richard for TROPONIN",
+  "isValid": true,
+  "isFilterRequired": 1,
+  "isTableDisplayRequired": 1,
+  "reportUniqueId": 0,
+  "classificationType": null,
+  "hospitalId": 4,
+  "genReportListReportsId": 695,
+  "loginUserId": ""
+}

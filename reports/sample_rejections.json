@@ -1,0 +1,222 @@
+{
+  "_comment": [
+    "Report 957 — 'SAMPLE REJECTION STATUS' (LAB).",
+    "Captured from the portal's own GetReportData request, unchanged apart from",
+    "the two dates and loginUserId, which the server fills in per request.",
+    "Joined by LIS_SAMPLE_NO: why a sample was turned away and who collected it.",
+    "Its Hospital filter is mandatory and has no '%' option, so this one is",
+    "fetched once per hospital and the answers are put together — see fan_out.",
+    "It has a row per rejected test, so the per-test columns are skipped and",
+    "only what is true of the whole sample is joined on.",
+    "Re-capture it the same way if the HIS ever changes the report's filters."
+  ],
+  "_meta": {
+    "title": "Sample rejections",
+    "key_column": "LIS_SAMPLE_NO",
+    "date_filters": {
+      "from": "FROM_DATE",
+      "to": "TO_DATE"
+    },
+    "skip_columns": [
+      "SERVICE_NAME",
+      "INV_MAST_SERVICE_ID"
+    ],
+    "fan_out": {
+      "filter": "SITE",
+      "column": "HOSPITAL",
+      "values": [
+        {
+          "value": "1",
+          "label": "Almoosa Specialist Hospital"
+        },
+        {
+          "value": "2",
+          "label": "Almoosa Rehabilitation Hospital"
+        },
+        {
+          "value": "3",
+          "label": "AL Moosa Health Center Al Aziziyah"
+        },
+        {
+          "value": "4",
+          "label": "Almoosa Health Center Al Nakheel"
+        },
+        {
+          "value": "5",
+          "label": "Almoosa Health Center Al Salmaniya"
+        }
+      ]
+    }
+  },
+  "getReportFilters": [
+    {
+      "controlTypeId": 0,
+      "displayOrder": 1,
+      "genReportListId": 957,
+      "genReportListParamsId": 3837,
+      "isMandatory": true,
+      "isParam": 1,
+      "keyField": null,
+      "maxLength": 0,
+      "paramsQueryTypeId": 0,
+      "spName": null,
+      "spParamsName": "FROM_DATE",
+      "spParamsTypeId": 0,
+      "valueField": null,
+      "spParamsStatus": 0,
+      "queryString": null,
+      "mainSpName": null,
+      "labelName": "FROM_DATE",
+      "dataSource": null,
+      "storedValue": "",
+      "paramPosition": 0,
+      "parameterSelectionData": null,
+      "isHospital": 0,
+      "relationParamName": null,
+      "relationParamId": 0,
+      "relationParamField": null,
+      "toParamField": null,
+      "isVisible": 1,
+      "isRelationMandatory": 0,
+      "storedValueText": ""
+    },
+    {
+      "controlTypeId": 0,
+      "displayOrder": 2,
+      "genReportListId": 957,
+      "genReportListParamsId": 3838,
+      "isMandatory": true,
+      "isParam": 1,
+      "keyField": null,
+      "maxLength": 0,
+      "paramsQueryTypeId": 0,
+      "spName": null,
+      "spParamsName": "TO_DATE",
+      "spParamsTypeId": 0,
+      "valueField": null,
+      "spParamsStatus": 0,
+      "queryString": null,
+      "mainSpName": null,
+      "labelName": "TO_DATE",
+      "dataSource": null,
+      "storedValue": "",
+      "paramPosition": 0,
+      "parameterSelectionData": null,
+      "isHospital": 0,
+      "relationParamName": null,
+      "relationParamId": 0,
+      "relationParamField": null,
+      "toParamField": null,
+      "isVisible": 1,
+      "isRelationMandatory": 0,
+      "storedValueText": ""
+    },
+    {
+      "controlTypeId": 8,
+      "displayOrder": 3,
+      "genReportListId": 957,
+      "genReportListParamsId": 3839,
+      "isMandatory": true,
+      "isParam": 1,
+      "keyField": "HOSPITAL_ID",
+      "maxLength": 0,
+      "paramsQueryTypeId": 1,
+      "spName": "HISWEB.SEL_MIS_HOSPITAL",
+      "spParamsName": "SITE",
+      "spParamsTypeId": 2,
+      "valueField": "NAME",
+      "spParamsStatus": 0,
+      "queryString": "select HOSPITAL_ID, NAME from YASASII.hospital",
+      "mainSpName": null,
+      "labelName": "Hospital",
+      "dataSource": null,
+      "storedValue": "1",
+      "paramPosition": 0,
+      "parameterSelectionData": [
+        {
+          "HOSPITAL_ID": 1,
+          "NAME": "Almoosa Specialist Hospital",
+          "REGION_ID": 160990
+        },
+        {
+          "HOSPITAL_ID": 2,
+          "NAME": "Almoosa Rehabilitation Hospital",
+          "REGION_ID": 160990
+        },
+        {
+          "HOSPITAL_ID": 3,
+          "NAME": "AL Moosa Health Center Al Aziziyah",
+          "REGION_ID": 160991
+        },
+        {
+          "HOSPITAL_ID": 4,
+          "NAME": "Almoosa Health Center Al Nakheel",
+          "REGION_ID": 160990
+        },
+        {
+          "HOSPITAL_ID": 5,
+          "NAME": "Almoosa Health Center Al Salmaniya",
+          "REGION_ID": 160990
+        }
+      ],
+      "isHospital": 0,
+      "relationParamName": null,
+      "relationParamId": 0,
+      "relationParamField": null,
+      "toParamField": null,
+      "isVisible": 1,
+      "isRelationMandatory": 0,
+      "filteredParameterSelectionData": [
+        {
+          "HOSPITAL_ID": 1,
+          "NAME": "Almoosa Specialist Hospital",
+          "REGION_ID": 160990
+        },
+        {
+          "HOSPITAL_ID": 2,
+          "NAME": "Almoosa Rehabilitation Hospital",
+          "REGION_ID": 160990
+        },
+        {
+          "HOSPITAL_ID": 3,
+          "NAME": "AL Moosa Health Center Al Aziziyah",
+          "REGION_ID": 160991
+        },
+        {
+          "HOSPITAL_ID": 4,
+          "NAME": "Almoosa Health Center Al Nakheel",
+          "REGION_ID": 160990
+        },
+        {
+          "HOSPITAL_ID": 5,
+          "NAME": "Almoosa Health Center Al Salmaniya",
+          "REGION_ID": 160990
+        }
+      ],
+      "storedValueText": "Almoosa Specialist Hospital"
+    }
+  ],
+  "genReportListId": 957,
+  "subReportId": 0,
+  "reportName": "SAMPLE REJECTION STATUS",
+  "reportTypeId": 3,
+  "moduleId": 30,
+  "categoryId": 78,
+  "displayOrder": 1,
+  "rptPrivilegeName": null,
+  "queryType": 3,
+  "queryString": null,
+  "spName": null,
+  "reportType": "ReportManger",
+  "moduleName": "Report Manger",
+  "categoryName": "LAB",
+  "description": null,
+  "isValid": true,
+  "isFilterRequired": 1,
+  "isTableDisplayRequired": 1,
+  "reportUniqueId": 0,
+  "classificationType": null,
+  "hospitalId": 4,
+  "genReportListReportsId": 1059,
+  "loginUserId": ""
+}

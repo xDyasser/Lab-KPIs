@@ -27,6 +27,7 @@ from it is what tells the server the window is still open.
 
 import json
 import os
+import re
 import socket
 import statistics
 import subprocess
@@ -448,12 +449,66 @@ def cache_stats():
     return stats
 
 
+def match_key(value):
+    """One spelling of a test name, so two reports' spacing cannot part them."""
+    return re.sub(r'\s+', ' ', str(value or '')).strip().upper()
+
+
+def fetch_linked_rows(name, meta, date_from, date_to, generation=None):
+    """One linked report's rows, chunked and cached like the main one.
+
+    A report whose mandatory filter has no "all" option — the rejection report
+    picks one hospital and there is no % — says so in its _meta as `fan_out`,
+    and is asked once per value instead. Each pass carries the value it was
+    asked for into the rows as a column of its own, so a rejection still says
+    which hospital turned the sample away once the passes are put together.
+    """
+    fan = meta.get('fan_out') or {}
+    passes = fan.get('values') or [None]
+    filter_name = fan.get('filter')
+    column_name = fan.get('column') or filter_name
+
+    rows = []
+    for one in passes:
+        filters = None
+        label = None
+        if one is not None and filter_name:
+            value = one.get('value') if isinstance(one, dict) else one
+            label = one.get('label') if isinstance(one, dict) else one
+            # Pinned the way the portal pins a dropdown: the id it selects on
+            # and the name that was chosen, in case the report reads both.
+            filters = {filter_name: {'value': value, 'text': label}}
+        phase = f'joining {name}' + (f' — {label}' if label else '')
+        part = his['client'].fetch_report_chunked(
+            name, date_from, date_to, filters=filters,
+            on_progress=lambda p, ph=phase: note_progress(p, ph),
+            should_stop=stop_check(generation),
+        )
+        if label and column_name:
+            for row in part:
+                row.setdefault(column_name, label)
+        rows.extend(part)
+    return rows
+
+
 def join_linked_reports(rows, date_from, date_to, generation=None):
     """Merge every other report in reports/ onto the main rows by sample number.
 
     A linked report adds its own columns to the sample it belongs to, prefixed
     with its name so two reports carrying a DEPARTMENT_NAME cannot overwrite
     each other. A sample a linked report does not mention is left as it is.
+
+    The main report has a row per test rather than per sample, so a linked
+    report that is also per test would otherwise land its last row on every
+    test of the sample. Such a report says so in its _meta as `match_column`,
+    naming the column on each side that has to agree as well as the sample
+    number. Without one, the first row a sample brings back is taken to
+    describe the whole sample, and a later row that disagrees is counted as
+    ambiguous rather than quietly preferred — that count is how you find out a
+    report needs a match_column.
+
+    `skip_columns` drops what is true of one row rather than of the sample: a
+    per-analyte result on a report that is joined by sample.
     """
     joined = {}
     index = defaultdict(list)
@@ -466,34 +521,65 @@ def join_linked_reports(rows, date_from, date_to, generation=None):
         if name == MAIN_REPORT:
             continue
         key_column = meta.get('key_column') or COL_SAMPLE
+        pair = meta.get('match_column') or {}
+        their_column = pair.get('linked')
+        our_column = pair.get('main')
+        # SLNO is the report's own row numbering. It says nothing about the
+        # sample and changes with every chunk boundary, so it never joins.
+        skip = {key_column, 'SLNO'} | set(meta.get('skip_columns') or ())
         try:
-            # Chunked and cached like the main report: a linked report over a
-            # year is exactly as slow as the one it is being joined onto.
-            extra = his['client'].fetch_report_chunked(
-                name, date_from, date_to,
-                on_progress=lambda p, n=name: note_progress(p, f'joining {n}'),
-                should_stop=stop_check(generation),
-            )
+            extra = fetch_linked_rows(name, meta, date_from, date_to, generation)
         except HISError as e:
             # One report being unavailable should not cost the whole board.
             print(f"[!] Linked report {name} failed: {e}")
-            joined[name] = {'rows': 0, 'matched': 0, 'error': str(e)}
+            joined[name] = {'rows': 0, 'matched': 0, 'ambiguous': 0, 'error': str(e)}
             continue
 
         matched = 0
+        ambiguous = 0
+        taken = {}   # id(main row) → the linked row already written onto it
+        counts = {}  # id(main row) → how many linked rows it could have taken
         for extra_row in extra:
             key = str(column(extra_row, key_column, '')).strip()
             targets = index.get(key)
             if not targets:
                 continue
-            matched += 1
+            theirs = match_key(column(extra_row, their_column, '')) if their_column else None
+            landed = False
             for target in targets:
+                if their_column and match_key(column(target, our_column, '')) != theirs:
+                    continue
+                counts[id(target)] = counts.get(id(target), 0) + 1
+                held = taken.get(id(target))
+                if held is not None:
+                    # Two rows for the same sample, and nothing to tell the
+                    # dashboard which of them this test belongs to. The first
+                    # stands; the disagreement is reported rather than hidden.
+                    if held != extra_row:
+                        ambiguous += 1
+                    continue
+                taken[id(target)] = extra_row
+                landed = True
                 for field, value in extra_row.items():
-                    if field == key_column:
+                    if field in skip:
                         continue
-                    target[f'{name}.{field}'] = value
-        joined[name] = {'rows': len(extra), 'matched': matched, 'error': None}
-        print(f"[*] Linked {name}: {len(extra)} rows, {matched} matched a sample")
+                    # The HIS pads some columns out to their database width.
+                    target[f'{name}.{field}'] = value.strip() if isinstance(value, str) else value
+            if landed:
+                matched += 1
+
+        # How many of the report's rows each sample brought back. One is the
+        # ordinary case; more says the columns above describe the first of
+        # several — two critical results on one sample, say — so the board can
+        # show that rather than imply there was only ever one.
+        for row in rows:
+            seen = counts.get(id(row))
+            if seen:
+                row[f'{name}.ROWS'] = seen
+        joined[name] = {'rows': len(extra), 'matched': matched,
+                        'ambiguous': ambiguous, 'error': None}
+        print(f"[*] Linked {name}: {len(extra)} rows, {matched} matched a sample"
+              + (f", {ambiguous} could not be told apart" if ambiguous else ""))
 
     return joined
 
@@ -507,7 +593,9 @@ def stop_check(generation):
     answer nobody is waiting for.
     """
     def stopped():
-        return his['generation'] != generation or not his['logged_in']
+        if generation is not None and his['generation'] != generation:
+            return True
+        return not his['logged_in']
     return stopped
 
 

@@ -108,6 +108,23 @@ Columns used: `SAMPLE_NO`, `MRNO`, `PATIENT_LOCATION`, `INV_CATEGORY_NAME`,
 `app.column()`, which forgives the HIS's spacing, so the spelling in
 `RECEVID BY NAME` does not have to be corrected to be found.
 
+### The linked reports
+
+Five more reports are fetched alongside the main one and joined onto it by
+sample number:
+
+| File | HIS report | What it adds |
+|---|---|---|
+| `specimen_collection.json` | 961, SAMPLE COLLECTION REPORT SPECIMEN | What the sample was drawn into — specimen type, container — and how urgent the collection was |
+| `stat_tests.json` | 1044, Total test as STAT with ACCEPTANCE | Sorting and result-entry stamps per test, so turnaround past acceptance reads off the same row |
+| `result_time.json` | 593, LAB Result Time | Collection, acceptance, sort and authorisation times, plus the ordering provider |
+| `sample_rejections.json` | 957, SAMPLE REJECTION STATUS | Why a sample was turned away, and who collected it |
+| `critical_results.json` | 362, Critical\_Results\_New | Whether the sample carried a critical result, and when it was authorised |
+
+Every one of them costs its own pass over the span, so a year is six reports'
+worth of waiting, not one. They are cached and chunked exactly like the main
+report, so the second look at a span is the cheap one.
+
 ### Adding another report
 
 Every other `.json` in `reports/` is fetched alongside the main one and **joined
@@ -134,7 +151,33 @@ To add one:
 ```
 
 `_meta` and `_comment` are notes for whoever reads the file; they are stripped
-before the body reaches the HIS.
+before the body reaches the HIS. Four more keys are optional, and each exists
+because one of the five reports above needed it:
+
+- **`date_filters`** — the report's own spelling of its two date parameters.
+  They are not the same everywhere: report 593 calls them `From Date` and
+  `To Date`, report 362 just `FROM` and `TO`.
+- **`key_column`** — where that report writes the sample number. Two of them
+  call it `LIS_SAMPLE_NO` rather than `SAMPLE_NO`.
+- **`match_column`** — `{"linked": "TEST_NAME", "main": "TEST_NAME"}`. The main
+  report has a row per *test*, not per sample. Without this, a linked report
+  that is also per test lands its last row on every test of that sample — the
+  urea result's timestamps shown against the blood gas. With it, the two sides
+  have to agree on the named column as well as the sample.
+- **`skip_columns`** — columns that are true of one row rather than of the
+  sample. Report 593 has a row per analyte with its own `RESULT`; joining that
+  by sample would pick one analyte's number and show it as the sample's.
+- **`fan_out`** — for a mandatory filter with no "all" option. The rejection
+  report must name one hospital, so it is fetched once per hospital and the
+  answers are put together, with the hospital that answered carried into a
+  column of its own.
+
+Every joined sample also gets a `<name>.ROWS` column: how many of that report's
+rows belonged to it. One is the ordinary case; more means the other columns
+describe the first of several — two critical results on one sample — rather than
+the only one. Where the dashboard cannot tell which row belongs to which test,
+it counts the disagreement instead of picking silently, and the count is printed
+after each fetch.
 
 Nothing else needs changing to *fetch* a linked report. Putting its columns on
 the board is a change to `build_kpis()` in `app.py`.

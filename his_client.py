@@ -865,7 +865,9 @@ class HISClient:
         }
         # Anything else the caller wants pinned, by the report's own parameter
         # name. A value of None means "all of them", which these reports spell
-        # as a null storedValue with the text "All".
+        # as a null storedValue with the text "All". A {'value', 'text'} pair
+        # pins a dropdown the way the portal does: the id the report selects on
+        # and the name the operator picked, which some filters echo back.
         values.update(filters or {})
 
         for param in body.get('getReportFilters', []):
@@ -876,6 +878,9 @@ class HISClient:
             if value is None:
                 param['storedValue'] = None
                 param['storedValueText'] = 'All'
+            elif isinstance(value, dict):
+                param['storedValue'] = value.get('value')
+                param['storedValueText'] = str(value.get('text', value.get('value', '')))
             else:
                 param['storedValue'] = value
                 param['storedValueText'] = str(value)
