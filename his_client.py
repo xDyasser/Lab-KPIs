@@ -74,7 +74,7 @@ DEFAULT_CONFIG = {
     # The window the dashboard asks for, as a span rather than two fixed dates,
     # so it keeps covering today after every midnight. There is no local store:
     # widening this is what "look further back" means.
-    'days_back': 7,
+    'days_back': 1,
     'days_ahead': 0,
     # The portal sends the staff's local midnight written as UTC — a report for
     # the 14th goes out as "2026-09-13T21:00:00.000Z". Sending noon instead
@@ -85,7 +85,7 @@ DEFAULT_CONFIG = {
     # the Pending dashboard's seconds — and a wide date range is a slow query.
     'poll_interval': 300,
     'verify_ssl': True,
-    'timeout': 120,
+    'timeout': 240,
 }
 
 CONFIG_KEYS = set(DEFAULT_CONFIG)
