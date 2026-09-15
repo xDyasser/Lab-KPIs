@@ -6,7 +6,10 @@
     "Two things here are not like the other reports: its date parameters are",
     "named 'From Date' and 'To Date' with spaces, and it calls the sample",
     "LIS_SAMPLE_NO — both are spelled out in _meta so the join still lands.",
-    "Its Visit Type, Category Name and Service Name filters are left at '%'.",
+    "Visit Type and Category Name are left at '%'. Service Name is not: this",
+    "report will not answer a whole day across every service, so test_filter",
+    "below has it asked one service at a time, for the test names the samples",
+    "received report brought back over the same span.",
     "Its rows are per analyte — finer than a test — so the analyte columns are",
     "skipped and only the sample's own times are joined on.",
     "Re-capture it the same way if the HIS ever changes the report's filters."
@@ -17,6 +20,10 @@
     "date_filters": {
       "from": "From Date",
       "to": "To Date"
+    },
+    "test_filter": {
+      "filter": "Service Name",
+      "all": "%"
     },
     "skip_columns": [
       "SERVICE_NAME",

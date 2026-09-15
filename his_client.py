@@ -113,6 +113,13 @@ DEFAULT_CONFIG = {
     # bearable and also the fastest way to make the HIS unhappy for everybody
     # else on it — 1 makes the fetch strictly sequential.
     'chunk_workers': 3,
+    # Two of the reports will not answer a whole day across every service, so
+    # they are asked one test at a time — the test names the main report brought
+    # back over the same span (see `test_filter` in reports/*.json). A span wide
+    # enough to hold more distinct tests than this is asked for the ordinary way
+    # instead: past a few hundred, one request per test is slower than the one
+    # slow request it was meant to avoid, and the tab says which way it went.
+    'test_filter_max': 400,
 
     # ── Disk cache ───────────────────────────────────────────
     # Chunks that have already come back, kept under data/cache so the next year
@@ -447,6 +454,11 @@ def load_report(name):
 class HISClient:
     def __init__(self, config=None):
         self.config = dict(DEFAULT_CONFIG)
+        # One pool of permits for every report request, however the fetch is
+        # shaped — see _report_slot.
+        self._slots = None
+        self._slot_size = 0
+        self._slot_lock = threading.Lock()
         if config:
             self.update_config(config)
         self.token = ''
@@ -477,8 +489,8 @@ class HISClient:
             self.config[key] = value
         for key in ('poll_interval', 'days_back', 'days_ahead', 'timeout',
                     'login_timeout', 'utc_offset_hours', 'chunk_days',
-                    'chunk_min_days', 'chunk_workers', 'cache_days',
-                    'cache_settle_days', 'cache_max_mb'):
+                    'chunk_min_days', 'chunk_workers', 'test_filter_max',
+                    'cache_days', 'cache_settle_days', 'cache_max_mb'):
             try:
                 self.config[key] = int(self.config[key])
             except (TypeError, ValueError):
@@ -494,6 +506,8 @@ class HISClient:
         # More than a handful of chunks at once is a denial of service on a
         # report server the whole hospital shares.
         self.config['chunk_workers'] = max(1, min(self.config['chunk_workers'], 8))
+        # 0 is a real answer: never ask one test at a time.
+        self.config['test_filter_max'] = max(0, min(self.config['test_filter_max'], 5000))
         self.config['cache_enabled'] = bool(self.config.get('cache_enabled', True))
         self.config['cache_days'] = max(0, self.config['cache_days'])
         self.config['cache_settle_days'] = max(0, self.config['cache_settle_days'])
@@ -890,15 +904,33 @@ class HISClient:
                                   or self._username or '')
         return body
 
+    def _report_slot(self):
+        """A permit to have one report request in flight.
+
+        Chunks are already asked for a few at a time, and a report that has to
+        be asked one test at a time (see `test_filter`) fans those passes out as
+        well. Nested, that would be "Chunks at once" squared — dozens of
+        requests at a report server the whole hospital shares. Every request
+        takes its permit from this one pool instead, so the setting stays the
+        true ceiling whatever shape the fetch takes.
+        """
+        wanted = max(1, int(self.config.get('chunk_workers', 3)))
+        with self._slot_lock:
+            if self._slots is None or self._slot_size != wanted:
+                self._slots = threading.BoundedSemaphore(wanted)
+                self._slot_size = wanted
+            return self._slots
+
     def fetch_report(self, name, date_from=None, date_to=None, filters=None):
         """Fetch one report and return its rows as dicts, column names untouched."""
         self.ensure_token()
         date_from, date_to = self.date_span(date_from, date_to)
 
         def post():
-            return self._request(self.config['report_path'],
-                                 self.build_body(name, date_from, date_to, filters),
-                                 auth=True)
+            with self._report_slot():
+                return self._request(self.config['report_path'],
+                                     self.build_body(name, date_from, date_to, filters),
+                                     auth=True)
 
         try:
             response = post()

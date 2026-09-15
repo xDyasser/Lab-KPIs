@@ -6,7 +6,10 @@
     "Joined onto the samples received by SAMPLE_NO: it carries the sorting and",
     "result-entry stamps the received report has no column for, so a sample's",
     "turnaround past acceptance can be read off the same row.",
-    "SERVICENAME and CATEGORYNAME are left at '%' and SITE at All.",
+    "CATEGORYNAME is left at '%' and SITE at All. SERVICENAME is not: asked",
+    "across every service the report outruns its own SQL, so test_filter has it",
+    "asked one service at a time, for the test names the samples received",
+    "report brought back over the same span.",
     "It has a row per test, so match_column pairs its TEST_NAME with the main",
     "report's: without that, one test's stamps would land on all of them.",
     "Re-capture it the same way if the HIS ever changes the report's filters."
@@ -17,6 +20,10 @@
     "date_filters": {
       "from": "FROM_DATE",
       "to": "TO_DATE"
+    },
+    "test_filter": {
+      "filter": "SERVICENAME",
+      "all": "%"
     },
     "match_column": {
       "linked": "TEST_NAME",

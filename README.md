@@ -6,9 +6,10 @@ span they choose, and draws the numbers a lab is actually asked about: how many
 samples came in, how long they waited before somebody accepted them, and where
 the waiting happens.
 
-Five more reports are fetched alongside it and joined on by sample number, which
-is what the four KPI tabs — rejections, critical results, and turnaround split
-between the work the lab ran itself and the work it sent on — are built from.
+Five more reports sit behind the four KPI tabs — rejections, critical results,
+and turnaround split between the work the lab ran itself and the work it sent
+on. Each is a pass of its own over the same span, so none of them is fetched
+until somebody opens that tab and presses **Show**.
 
 Sibling of the Pending Authorization dashboard, and it borrows that project's
 hardest-won piece — the sign-in — unchanged.
@@ -77,6 +78,7 @@ which has no address bar).
 | Fetch in chunks of | Days per request when the span is wider (default 7). `0` asks for the whole span in one request. See *Waiting for the HIS*. |
 | Chunks at once | How many chunks are in flight together (default 3, maximum 8). Higher is faster here and slower for everyone else on the HIS. |
 | Wait for the HIS | Seconds before one chunk is given up on (default 240). |
+| Ask one test at a time up to | How many distinct tests a range may hold before the two TAT reports are asked across every service instead of one at a time (default 400). `0` never asks one at a time. See *Reports asked one test at a time*. |
 | Remember fetched chunks | The disk cache. On by default. It writes report rows to this PC — see *Waiting for the HIS*. |
 | Keep a remembered chunk for | Days before a cached chunk is fetched again anyway (default 30). |
 | Clear remembered chunks | Empties `data/cache` now. The button says how much is in there. |
@@ -114,8 +116,8 @@ Columns used: `SAMPLE_NO`, `MRNO`, `PATIENT_LOCATION`, `INV_CATEGORY_NAME`,
 
 ### The linked reports
 
-Five more reports are fetched alongside the main one and joined onto it by
-sample number:
+Five more reports are joined onto the main one by sample number. None of them is
+fetched until a tab asks for it — see *Fetching a tab* below:
 
 | File | HIS report | What it adds |
 |---|---|---|
@@ -125,14 +127,55 @@ sample number:
 | `sample_rejections.json` | 957, SAMPLE REJECTION STATUS | Why a sample was turned away, and who collected it |
 | `critical_results.json` | 362, Critical\_Results\_New | Whether the sample carried a critical result, and when it was authorised |
 
-Every one of them costs its own pass over the span, so a year is six reports'
-worth of waiting, not one. They are cached and chunked exactly like the main
-report, so the second look at a span is the cheap one.
+Every one of them costs its own pass over the span, which is why a tab has to
+ask. They are cached and chunked exactly like the main report, so the second look
+at a span is the cheap one.
+
+### Fetching a tab
+
+Opening a KPI tab shows what it is and what it will cost, not a board of zeros.
+**Show** fetches that tab's report over the range now on the board; the numbers
+fill in as its chunks land, the same way the overview does.
+
+A report asked for stays asked for. Every refresh and every new range fetches it
+again, so the tab stays live rather than emptying under whoever is reading it —
+until **Stop showing**, which hands the span's fetches back. Nothing is
+remembered between runs: a fresh start fetches the samples received and nothing
+else.
+
+The rejections tab asks for two reports, its own and the collection report. That
+is not tidiness: a rejected sample is often never accepted, so it never reaches
+the list of samples received, and without the collection report picking a
+department would empty the very tab that exists to count those samples. The
+other three tabs count rows whose samples were received, which the main report
+already accounts for.
+
+### Reports asked one test at a time
+
+Two of them will not answer across every service. Report 593 times out over a
+single day asked for all of them at once, and report 1044 outruns its own SQL the
+same way. Both have a service filter, so both are asked **one service at a
+time** — and the services asked for are the test names the main report just
+brought back over the same span, which is the only list that is certainly
+relevant to what is on the board.
+
+The passes run together, up to *Chunks at once* of them, and that setting is also
+the ceiling on requests actually in flight — a report asked one test at a time
+cannot multiply into dozens of calls at once on a report server the whole
+hospital shares. Each pass is cached under its own key, so the second look at a
+span costs nothing again.
+
+A service the report has never heard of answers nothing, and a pass that fails
+costs that service rather than the tab: both are counted and said under the
+tiles. And a range holding more distinct tests than *Ask one test at a time up
+to* (default 400) is asked the ordinary way instead — past a few hundred, one
+request per test is slower than the one slow request it was meant to avoid — with
+the tab saying which way it went.
 
 ### Adding another report
 
-Every other `.json` in `reports/` is fetched alongside the main one and **joined
-onto it by sample number**. Its columns are added to the sample they belong to,
+Every other `.json` in `reports/` is fetched when a tab asks for it and **joined
+onto the main report by sample number**. Its columns are added to the sample they belong to,
 prefixed with the file's name (`vitals.RESULT_TIME`), so two reports carrying a
 `DEPARTMENT_NAME` cannot overwrite each other. A sample a linked report does not
 mention is simply left alone, and a linked report that fails does not cost the
@@ -175,6 +218,10 @@ because one of the five reports above needed it:
   report must name one hospital, so it is fetched once per hospital and the
   answers are put together, with the hospital that answered carried into a
   column of its own.
+- **`test_filter`** — `{"filter": "Service Name"}`, for a report that will not
+  answer across every service. It is then fetched once per test name the main
+  report brought back over the same span. See *Reports asked one test at a
+  time*.
 
 Every joined sample also gets a `<name>.ROWS` column: how many of that report's
 rows belonged to it. One is the ordinary case; more means the other columns
@@ -190,7 +237,7 @@ the board is a change to `build_kpis()` in `app.py`.
 
 Five boards over the same fetched span. The **Overview** is the original one:
 samples received, how long they waited, and where. The other four are one linked
-report each.
+report each, and each waits until its **Show** button is pressed.
 
 | Tab | Built from | What it measures |
 |---|---|---|
@@ -385,5 +432,6 @@ bundled with `templates/` and `static/`.
 - **Its own icon.** `static/icon.png` is currently the Pending dashboard's, so
   the two look identical in the taskbar. It wants a mark of its own, and the
   build has no `--icon` yet.
-- **A per-report switch.** Six reports is six passes over the span, and there is
-  no way to turn one off short of taking its file out of `reports/`.
+- **Remembering which tabs were open.** Show is per session: a PC that is only
+  ever used for the rejections board still starts every morning with the samples
+  received alone.
