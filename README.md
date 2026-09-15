@@ -194,24 +194,43 @@ report each.
 
 | Tab | Built from | What it measures |
 |---|---|---|
-| Rejections | 957, `sample_rejections` | Samples the lab turned away, as a count and as a share of the samples received, and every reason it recorded |
+| Rejections | 957, `sample_rejections` | Samples the lab turned away, as a count and against the samples received, and every reason it recorded |
 | Critical results | 362, `critical_results` | `MACHINE_RESULT_TIME` → `SECOND_AUTH_DATETIME`: average, median, and how many took longer than fifteen and thirty minutes |
 | Referred TAT | 593, `result_time` | `SAMPLE_ACCEPTANCE_TIME` → `AUTHORIZATION_DATE` for samples the lab sent on |
 | In-house TAT | 1044, `stat_tests` | `TAT_SORT_TO_RESULT_ENTRY` — sorting to result entry, already worked out by the HIS — for samples the lab ran itself |
 
-The main report is not a source of figures on these tabs. It is there to say
-**which sample numbers count**: the other five reports carry no department, so
-the only way to show one department's rejections or one department's turnaround
-is to take the sample numbers the main report gives for that department and keep
-the rows that match. Nothing else about a sample is carried across.
-
 Each tab reads its report's **own rows** rather than the columns joined onto the
 samples. A rejection or a critical result is a row per analyte and the join keeps
 only the first of them (see *Adding another report*), which describes the sample
-but not each test on it. Every tab is still narrowed to the samples the main
-report brought back for the same span, so a rejection recorded against a sample
-outside the range is not counted against it, and the Department filter above
-reaches all five tabs.
+but not each test on it.
+
+### How a tab knows which department a row belongs to
+
+The other five reports carry no department of their own, so every row is given
+the department of **its sample number** — the same way the Lab Analytics app
+labels its KPI tabs. The lookup asks two reports in order:
+
+1. the **main report**, 1094, which is where `DEPARTMENT_NAME` comes from and
+   which is the spelling the Department filter uses;
+2. the **collection report**, 961, for any sample the first one has never heard
+   of.
+
+The second one matters, and is why this is not simply a filter on the samples
+received. **A rejected sample is often never accepted**, so it never reaches the
+list of samples received at all — take the tabs' rows and keep only those whose
+sample is on that list and the rejections tab quietly loses the very rows it
+exists to count. The collection report still has those samples, because they
+were collected before anybody turned them away.
+
+A row whose sample **neither** report mentions keeps its place and is counted as
+unmatched: the tiles include it, and a line under them says how many there were.
+It only drops out when a department has been picked, because then there is no
+honest way to say it belongs — and that line says how many were left out for
+that reason too. The same line says how many samples the collection report
+filled in, and says plainly when the collection report came back with no
+department column at all, which is the one case where nothing can be filled in.
+
+The Department filter reaches all five tabs.
 
 ### In house or referred
 
@@ -248,7 +267,9 @@ rows already in memory being read again.
 One figure is withheld under a test filter — the rejection **rate**. Its
 denominator is every sample received, which is not the same population as one
 service's rejections, so the tab says so rather than showing a number that looks
-right and is not.
+right and is not. Even across every test it is rejections measured *against* the
+received workload rather than a share of it: a sample rejected before it was ever
+accepted is in the numerator and, by the same token, not in the denominator.
 
 ## History
 

@@ -122,6 +122,15 @@ REPORT_REJECTIONS = 'sample_rejections'
 REPORT_CRITICAL = 'critical_results'
 REPORT_STAT = 'stat_tests'
 REPORT_RESULT_TIME = 'result_time'
+REPORT_COLLECTION = 'specimen_collection'
+
+# Where a department can be read off the collection report. It is the second
+# place a sample number is looked up when the main report has never heard of it
+# — a rejected sample is often never received, so it is missing from the list of
+# samples received but present in the list of samples collected. The HIS spells
+# the column differently between report versions, so the first of these the rows
+# actually carry is the one used.
+DEPT_COLUMNS = ('DEPARTMENT_NAME', 'DEPARTMENT', 'DEPT_NAME', 'DEPARTMENTNAME')
 
 
 def column(row, name, default=''):
@@ -420,9 +429,15 @@ def build_kpis():
 # samples: those reports carry a row per analyte, and the join keeps only the
 # first of them, which describes the sample but not each test on it.
 #
-# Every tab is narrowed to the samples the main report brought back for the same
-# span — so the department filter above still means something here, and a
-# rejection for a sample outside the span is not counted against it.
+# A tab's rows are not narrowed to the samples the main report brought back.
+# They cannot be: a rejected sample is often never accepted, so it never reaches
+# the list of samples received, and an intersection quietly throws away the very
+# rows the rejections tab exists to count. Instead each row is given the
+# department of its sample number — looked up in the main report, then in the
+# collection report — exactly the way the Lab Analytics app labels its KPI tabs.
+# A row whose sample neither report mentions keeps its place and is counted as
+# unmatched; it only drops out when a department has been picked, because then
+# there is no honest way to say it belongs.
 # ─────────────────────────────────────────────
 TABS = {
     'rejections': {'report': REPORT_REJECTIONS, 'key': 'LIS_SAMPLE_NO', 'test': 'SERVICE_NAME'},
@@ -521,27 +536,123 @@ def kind_for(maps, sample, test=''):
     return None
 
 
-def tab_rows(tab):
-    """A tab's report rows, narrowed to the samples on the board and its test.
+def collection_dept_column(rows):
+    """Which of DEPT_COLUMNS the collection report actually brought back."""
+    for row in rows[:50]:
+        for name in DEPT_COLUMNS:
+            if text(row, name):
+                return name
+    return None
 
-    Returns the rows, the test names the tab could offer, and the one chosen —
-    the choices are worked out before the filter is applied, or picking a test
-    would leave the dropdown holding only that test.
+
+# The sample → department lookup, worked out once per set of fetched rows. Four
+# tabs ask for it and the main report can be a year of them, so it is not built
+# four times over.
+_dept_cache = {'key': None, 'value': None}
+
+
+def build_department_map():
+    """Every sample number the fetch saw, and the department it belongs to.
+
+    The main report answers first: it is the one that carries DEPARTMENT_NAME,
+    and it is the department the board's filter is spelled in. The collection
+    report fills the gaps — a sample rejected before it was ever accepted never
+    reaches the received list, so its rejection would otherwise be attached to
+    no department at all and vanish the moment somebody picks one.
+
+    Comes back with how many samples each report accounted for, and which
+    column the collection report's department was read from, so a tab can say
+    plainly when the second lookup had nothing to offer.
+    """
+    by_sample = {}
+    for row in store['rows']:
+        sample = text(row, COL_SAMPLE)
+        dept = text(row, COL_DEPARTMENT)
+        if sample and dept:
+            by_sample.setdefault(sample, dept)
+    from_main = len(by_sample)
+
+    collected = store['linked_rows'].get(REPORT_COLLECTION) or []
+    col = collection_dept_column(collected)
+    if col:
+        for row in collected:
+            sample = str(column(row, 'SAMPLE_NO', '')).strip()
+            dept = text(row, col)
+            if sample and dept and sample not in by_sample:
+                by_sample[sample] = dept
+    return {
+        'by_sample': by_sample,
+        'from_main': from_main,
+        'from_collection': len(by_sample) - from_main,
+        'column': col,
+        'collection_rows': len(collected),
+    }
+
+
+def department_map():
+    key = (store['fetched_at'], len(store['rows']),
+           len(store['linked_rows'].get(REPORT_COLLECTION) or []))
+    if _dept_cache['key'] != key:
+        _dept_cache['key'] = key
+        _dept_cache['value'] = build_department_map()
+    return _dept_cache['value']
+
+
+def tab_rows(tab):
+    """A tab's report rows, labelled with their department and narrowed to its test.
+
+    Every row of the tab's own report is kept, not only those whose sample the
+    main report happens to mention — see the note above TABS. Picking a
+    department narrows to the rows that are known to belong to it; the ones no
+    report could place are counted and reported rather than folded in.
+
+    Returns the rows, the test names the tab could offer, the one chosen, how
+    many samples the board is showing, and the match tally. The choices are
+    worked out before the test filter is applied, or picking a test would leave
+    the dropdown holding only that test.
     """
     spec = TABS[tab]
-    samples = {text(r, COL_SAMPLE) for r in visible_rows() if text(r, COL_SAMPLE)}
-    rows = [r for r in (store['linked_rows'].get(spec['report']) or [])
-            if str(column(r, spec['key'], '')).strip() in samples]
+    depts = department_map()
+    wanted = view['department']
+    received = len({text(r, COL_SAMPLE) for r in visible_rows() if text(r, COL_SAMPLE)})
+
+    rows = []
+    matched = unmatched = dropped = 0
+    for row in (store['linked_rows'].get(spec['report']) or []):
+        sample = str(column(row, spec['key'], '')).strip()
+        dept = depts['by_sample'].get(sample)
+        if dept:
+            matched += 1
+        else:
+            unmatched += 1
+        if wanted and dept != wanted:
+            # Rows belonging to another department are simply not this
+            # department's. Rows belonging to no known department are a
+            # different thing, and the only ones worth reporting: they are left
+            # out because nothing could say where they belong.
+            if not dept:
+                dropped += 1
+            continue
+        rows.append(row)
+
     names = sorted({text(r, spec['test']) for r in rows if text(r, spec['test'])})
     chosen = (view['tests'].get(tab) or '').strip()
     if chosen:
         rows = [r for r in rows if text(r, spec['test']) == chosen]
-    return rows, names, chosen, len(samples)
+    tally = {
+        'matched': matched,
+        'unmatched': unmatched,
+        'dropped': dropped if wanted else 0,
+        'from_collection': depts['from_collection'],
+        'collection_column': depts['column'],
+        'collection_rows': depts['collection_rows'],
+    }
+    return rows, names, chosen, received, tally
 
 
-def tab_shell(tab, rows, names, chosen, received, error=None):
+def tab_shell(tab, rows, names, chosen, received, tally, error=None):
     return {'tab': tab, 'tests': names, 'test': chosen, 'rows': len(rows),
-            'received': received, 'error': error}
+            'received': received, 'match': tally, 'error': error}
 
 
 def linked_error(report):
@@ -551,8 +662,8 @@ def linked_error(report):
 
 def build_rejections():
     """Samples the lab turned away, and what it said about why."""
-    rows, names, chosen, received = tab_rows('rejections')
-    out = tab_shell('rejections', rows, names, chosen, received,
+    rows, names, chosen, received, tally = tab_rows('rejections')
+    out = tab_shell('rejections', rows, names, chosen, received, tally,
                     linked_error(REPORT_REJECTIONS))
     rejected = {str(column(r, 'LIS_SAMPLE_NO', '')).strip() for r in rows}
     rejected.discard('')
@@ -563,7 +674,10 @@ def build_rejections():
         # A rate is only a rate against everything the lab received. Narrow the
         # tab to one test and the denominator no longer matches the numerator —
         # the rejection report names services the main report does not — so the
-        # figure is withheld rather than quietly wrong.
+        # figure is withheld rather than quietly wrong. Even across every test
+        # it is rejections measured against the received workload rather than a
+        # share of it: a sample rejected before it was ever accepted is in the
+        # numerator and not in the denominator.
         'rate': (round(100.0 * len(rejected) / received, 2)
                  if received and not chosen else None),
     }
@@ -578,8 +692,8 @@ def build_critical():
     existed, and then somebody authorised it a second time. Fifteen and thirty
     minutes are counted out because those are the lines the lab is held to.
     """
-    rows, names, chosen, received = tab_rows('critical')
-    out = tab_shell('critical', rows, names, chosen, received,
+    rows, names, chosen, received, tally = tab_rows('critical')
+    out = tab_shell('critical', rows, names, chosen, received, tally,
                     linked_error(REPORT_CRITICAL))
     delays = []
     per_test = defaultdict(list)
@@ -632,8 +746,9 @@ def build_tat(kind):
     else:
         tab, clock = 'referred_tat', 'Acceptance to authorisation (report 593).'
     spec = TABS[tab]
-    rows, names, chosen, received = tab_rows(tab)
-    out = tab_shell(tab, rows, names, chosen, received, linked_error(spec['report']))
+    rows, names, chosen, received, tally = tab_rows(tab)
+    out = tab_shell(tab, rows, names, chosen, received, tally,
+                    linked_error(spec['report']))
     out['clock'] = clock
 
     per_test = defaultdict(list)

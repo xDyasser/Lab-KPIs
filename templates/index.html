@@ -868,12 +868,41 @@ function renderChrome(data) {
 
 /* ───────────────────────────────────────────────────────────
    The four KPI tabs
-   Each is one linked report, over the same samples the overview
-   is showing — so the department filter still means something
-   here, and a rejection for a sample outside the span is not
-   counted against it.
+   Each is one linked report, read whole rather than narrowed to
+   the samples the overview is showing — a rejected sample is
+   often never received, so an intersection would drop the very
+   rows these tabs count. Each row is labelled with the
+   department of its sample instead, from the main report and
+   then from the collection report, and what could not be
+   labelled is said under the tiles.
    ─────────────────────────────────────────────────────────── */
 const pct = (v) => (v === null || v === undefined) ? '—' : v.toFixed(1) + '%';
+
+/** What the sample-number lookup could and could not place.
+ *
+ *  A tab's rows are labelled with the department of their sample — from the
+ *  main report first, then from the collection report, which is where a sample
+ *  rejected before it was ever accepted still appears. Rows nothing could place
+ *  are said out loud rather than quietly kept or quietly dropped. */
+function matchNote(t) {
+  const m = t.match;
+  if (!m || (!m.unmatched && !m.dropped && !m.from_collection)) return null;
+  const parts = [];
+  const total = m.matched + m.unmatched;
+  parts.push(`Department known for ${fmt(m.matched)} of ${fmt(total)} rows`
+             + (m.from_collection
+                ? ` · ${fmt(m.from_collection)} sample${m.from_collection === 1 ? '' : 's'} filled in from the collection report`
+                : ''));
+  if (m.dropped)
+    parts.push(`${fmt(m.dropped)} row${m.dropped === 1 ? '' : 's'} left out: no report mentions their sample, so nothing can say which department it belongs to`);
+  else if (m.unmatched)
+    parts.push(`${fmt(m.unmatched)} row${m.unmatched === 1 ? ' belongs' : 's belong'} to a sample neither report mentions — still counted here, but a department filter will leave ${m.unmatched === 1 ? 'it' : 'them'} out`);
+  if (m.unmatched && !m.collection_column)
+    parts.push(m.collection_rows
+      ? 'The collection report brought back no department column, so nothing could be filled in from it'
+      : 'The collection report brought back nothing for this range');
+  return noteCard(parts.join(' · ') + '.');
+}
 
 function noteCard(message) {
   const node = el('div', { class: 'card wide' });
@@ -915,11 +944,13 @@ function renderRejections(t) {
     tile('Rejection rate', n.rate === null ? '—' : n.rate.toFixed(2) + '%', '',
          n.rate === null
            ? 'Only shown across every test — the rejection report names services the main report does not.'
-           : 'Rejected samples ÷ samples received'),
+           : 'Rejected samples ÷ samples received — a sample rejected before it was accepted is not in the second figure'),
     tile('Tests turned away', fmt(n.lines), '',
          'A sample rejected for four tests is counted four times here'),
   );
   if (t.error) charts.appendChild(noteCard('The rejection report did not answer: ' + t.error));
+  const note = matchNote(t);
+  if (note) charts.appendChild(note);
   charts.appendChild(card('Why samples were rejected',
     'Every reason the lab recorded, biggest first.',
     (width) => hbar(t.by_reason, { width, labelWidth: 260, unit: 'rejections',
@@ -940,6 +971,8 @@ function renderCritical(t) {
     tile('Over 30 minutes', fmt(n.over_30), '', 'late' + share(n.over_30)),
   );
   if (t.error) charts.appendChild(noteCard('The critical results report did not answer: ' + t.error));
+  const cnote = matchNote(t);
+  if (cnote) charts.appendChild(cnote);
   charts.appendChild(card('How long the authorisation took',
     'Machine result to second authorisation. Darker is longer.',
     (width) => hbar(t.buckets, { width, ramp: true, labelWidth: 120, unit: 'results',
@@ -970,6 +1003,8 @@ function renderTat(t) {
          `${fmt(n.met)} of ${fmt(n.measured)} within the time set for their test`),
   );
   if (t.error) charts.appendChild(noteCard('This tab\u2019s report did not answer: ' + t.error));
+  const tnote = matchNote(t);
+  if (tnote) charts.appendChild(tnote);
 
   // What was left out, and why. A turnaround figure that quietly drops a third
   // of its rows is worse than one that says it did.
