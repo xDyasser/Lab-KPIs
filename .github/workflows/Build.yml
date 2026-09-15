@@ -1,0 +1,99 @@
+name: Build the Windows executable
+
+# The dashboard is installed by copying one .exe onto a PC, so the build has to
+# happen on Windows. BUILD.bat is what a maintainer runs by hand; the workflow
+# runs the same script rather than its own copy of the flags, so the two cannot
+# drift apart.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install
+        run: pip install -r requirements.txt pyinstaller
+
+      - name: Build
+        shell: cmd
+        run: BUILD.bat
+
+      # A build that produces an .exe is not the same as a build that works: a
+      # forgotten --add-data only shows up when the thing is started and cannot
+      # find its templates or its report bodies. So start it and ask it.
+      - name: Check it runs
+        shell: pwsh
+        run: |
+          $exe = Start-Process -FilePath dist\LabKPIs.exe -ArgumentList '--no-window' -PassThru
+          try {
+            $page = $null
+            foreach ($attempt in 1..30) {
+              Start-Sleep -Seconds 1
+              try {
+                $page = Invoke-WebRequest -Uri http://127.0.0.1:5050/ -UseBasicParsing -TimeoutSec 5
+                break
+              } catch { }
+            }
+            if (-not $page -or $page.StatusCode -ne 200) {
+              throw "The dashboard never answered on port 5050."
+            }
+            if ($page.Content -notmatch 'Sign in to the HIS') {
+              throw "The page came back without its template."
+            }
+
+            # The captured report bodies have to be inside the exe too.
+            $status = Invoke-WebRequest -Uri http://127.0.0.1:5050/api/his/status `
+              -UseBasicParsing -TimeoutSec 5
+            if ($status.Content -notmatch 'samples_received') {
+              throw "The exe was built without reports/."
+            }
+
+            Write-Host "Started, served its page, and found its report definitions."
+          } finally {
+            if (-not $exe.HasExited) { Stop-Process -Id $exe.Id -Force }
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LabKPIs
+          path: dist/LabKPIs.exe
+          if-no-files-found: error
+
+  # Tagging a version publishes the executable, so installing it on a PC is a
+  # download rather than a build.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: LabKPIs
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" LabKPIs.exe \
+            --repo "${{ github.repository }}" \
+            --title "${{ github.ref_name }}" \
+            --generate-notes
