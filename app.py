@@ -7,6 +7,13 @@ sample number. Everything is worked out from the rows as they arrive: there is
 no local database, so "look further back" means asking the HIS for a wider
 span, and the numbers are always the HIS's own.
 
+A wider span is also a much slower one — the HIS answers a day of the main
+report in about two minutes and a month in about ten — so a span is cut into
+chunks the report can actually finish, and the chunks that have already come
+back are kept under data/cache so the next year costs only the days since the
+last. That cache is the one thing here written to disk that is patient data;
+see "Waiting for the HIS" in the README, and the switch for it in Advanced.
+
 Signing in is the Pending dashboard's proven path, unchanged: a browser with no
 window fills in the portal's real login page, and the encrypted sign-in body it
 posts is kept in memory so the hour-old token renews itself in silence.
@@ -34,7 +41,8 @@ from flask import Flask, jsonify, render_template, request
 
 import browser_login
 import his_client
-from his_client import HISAuthError, HISClient, HISError, parse_datetime
+from his_client import (HISAuthError, HISCancelled, HISClient, HISError,
+                        parse_datetime)
 
 
 # ─────────────────────────────────────────────
@@ -61,6 +69,10 @@ BASE_DIR = _base_dir()
 DATA_DIR = _data_dir()
 HIS_CONFIG_FILE = os.path.join(DATA_DIR, 'his_config.json')
 VIEW_FILE = os.path.join(DATA_DIR, 'view.json')
+# Fetched report chunks, kept between runs so a year costs a year once. This is
+# the one place the dashboard writes patient data down — see "Waiting for the
+# HIS" in the README, and the switch for it in Advanced.
+CACHE_DIR = os.path.join(DATA_DIR, 'cache')
 
 app = Flask(
     __name__,
@@ -119,8 +131,9 @@ def text(row, name):
 # ─────────────────────────────────────────────
 # THE FETCHED ROWS
 # One span's worth of the HIS, held in memory. Refetched when the viewer moves
-# the dates and on every poll; never written to disk, because it is patient data
-# and because the HIS is the only copy worth trusting.
+# the dates and on every poll — the HIS is the only copy worth trusting, so
+# nothing here is ever the source of a number. The chunks behind it may be
+# remembered on disk (cache.py); these assembled rows are not.
 # ─────────────────────────────────────────────
 store = {
     'rows': [],
@@ -128,6 +141,12 @@ store = {
     'to': None,
     'fetched_at': None,
     'linked': {},      # report name → how many of its rows found a sample
+    # A wide span arrives a chunk at a time and a year takes a while, so the
+    # board says how far along it is rather than sitting blank. `partial` marks
+    # rows that are only some of the span — the numbers under them are real but
+    # not yet the whole answer.
+    'progress': {'active': False, 'done': 0, 'total': 0, 'cached': 0,
+                 'fetched': 0, 'rows': 0, 'partial': False, 'phase': ''},
 }
 
 # What the viewer is looking at. A span in days rather than two dates, so the
@@ -335,6 +354,7 @@ def dashboard_payload():
         'range': {'from': store['from'], 'to': store['to']},
         'fetched_at': store['fetched_at'],
         'linked': store['linked'],
+        'progress': dict(store['progress']),
     }
 
 
@@ -357,11 +377,23 @@ his = {
     'last_rows': 0,
     'last_error_at': None,
     'login_endpoint': None,
+    # Bumped by every new fetch. A year-wide fetch already running notices that
+    # it is no longer the current one and stops at its next chunk, instead of
+    # making the viewer wait out a span they have already moved off.
+    'generation': 0,
+    'last_duration': 0.0,
 }
+
+# Handing out fetch generations. Three threads can ask for one at once — the
+# poll loop, Refresh, and a moved date range.
+generation_lock = threading.Lock()
 
 # One fetch at a time. The poll loop, the Refresh button and a widened date
 # span can all ask at once, and the HIS is slow enough for that to overlap.
 fetch_lock = threading.Lock()
+
+# Where the fetched chunks are remembered between runs.
+his['client'].attach_cache(CACHE_DIR)
 
 
 def load_his_config():
@@ -397,6 +429,8 @@ def his_status_payload():
         'expires_in': client.seconds_left() if his['logged_in'] else 0,
         'last_fetch': his['last_fetch'],
         'last_rows': his['last_rows'],
+        'last_duration': his['last_duration'],
+        'cache': cache_stats(),
         'error': his['error'],
         'login_endpoint': his['login_endpoint'],
         'reports': his_client.list_reports(),
@@ -404,7 +438,17 @@ def his_status_payload():
     }
 
 
-def join_linked_reports(rows, date_from, date_to):
+def cache_stats():
+    """What is on disk, for the line in Advanced next to "Clear cache"."""
+    cache = his['client'].cache
+    if not cache:
+        return {'enabled': False, 'chunks': 0, 'bytes': 0}
+    stats = cache.stats()
+    stats['enabled'] = bool(his['client'].config.get('cache_enabled', True))
+    return stats
+
+
+def join_linked_reports(rows, date_from, date_to, generation=None):
     """Merge every other report in reports/ onto the main rows by sample number.
 
     A linked report adds its own columns to the sample it belongs to, prefixed
@@ -423,7 +467,13 @@ def join_linked_reports(rows, date_from, date_to):
             continue
         key_column = meta.get('key_column') or COL_SAMPLE
         try:
-            extra = his['client'].fetch_report(name, date_from, date_to)
+            # Chunked and cached like the main report: a linked report over a
+            # year is exactly as slow as the one it is being joined onto.
+            extra = his['client'].fetch_report_chunked(
+                name, date_from, date_to,
+                on_progress=lambda p, n=name: note_progress(p, f'joining {n}'),
+                should_stop=stop_check(generation),
+            )
         except HISError as e:
             # One report being unavailable should not cost the whole board.
             print(f"[!] Linked report {name} failed: {e}")
@@ -448,29 +498,88 @@ def join_linked_reports(rows, date_from, date_to):
     return joined
 
 
+def stop_check(generation):
+    """A callable the fetch asks between chunks: am I still the current fetch?
+
+    A year is a long time to hold the viewer to a range they have moved off,
+    and longer still to make the next fetch queue behind. So a fetch that has
+    been overtaken — or a sign-out — stops where it is instead of finishing an
+    answer nobody is waiting for.
+    """
+    def stopped():
+        return his['generation'] != generation or not his['logged_in']
+    return stopped
+
+
+def note_progress(payload, phase, partial=True):
+    """Publish how far along a fetch is, for the line under the date buttons."""
+    progress = store['progress']
+    progress.update(payload)
+    progress['phase'] = phase
+    progress['active'] = True
+    progress['partial'] = partial and payload.get('done', 0) < payload.get('total', 0)
+
+
 def his_fetch_once():
-    """Pull the reports once and rebuild the board. Returns the row count."""
+    """Pull the reports once and rebuild the board. Returns the row count.
+
+    A wide span is not one request. The HIS answers a day of the main report in
+    about two minutes and a month in ten, so a year asked for in one go times
+    out; it is fetched a chunk at a time instead, the chunks already on disk are
+    read back rather than asked for again, and the rows are put on the board as
+    they land so the board fills in rather than waiting an hour to appear.
+    """
     client = his['client']
     today = datetime.now().date()
     date_from = (today - timedelta(days=view['days_back'])).strftime('%Y-%m-%d')
     date_to = (today + timedelta(days=view['days_ahead'])).strftime('%Y-%m-%d')
 
+    # Claim the fetch before waiting for the lock, so an hour-long fetch still
+    # running sees that it has been overtaken and lets go.
+    with generation_lock:
+        his['generation'] += 1
+        generation = his['generation']
+    stopped = stop_check(generation)
+    started = time.time()
+
     with fetch_lock:
+        if stopped():
+            return len(store['rows'])
         his['fetching'] = True
+        # The board is rebuilt from this list on every poll of the page, so
+        # appending to it as the chunks land is what makes a year fill in.
+        rows = []
+        store['rows'] = rows
+        store['from'] = date_from
+        store['to'] = date_to
+        store['linked'] = {}
+        store['progress'] = {'active': True, 'done': 0, 'total': 0, 'cached': 0,
+                             'fetched': 0, 'rows': 0, 'partial': True,
+                             'phase': 'reading the report'}
+        complete = False
         try:
-            rows = client.fetch_report(MAIN_REPORT, date_from, date_to)
-            linked = join_linked_reports(rows, date_from, date_to)
+            client.fetch_report_chunked(
+                MAIN_REPORT, date_from, date_to,
+                on_rows=rows.extend,
+                on_progress=lambda p: note_progress(p, 'reading the report'),
+                should_stop=stopped,
+            )
+            linked = join_linked_reports(rows, date_from, date_to, generation)
+            complete = True
         finally:
             his['fetching'] = False
+            store['progress']['active'] = False
+            # A fetch that fell over part way leaves real rows on the board —
+            # just not all of them. Saying so is better than either hiding them
+            # or letting them pass for the whole span.
+            store['progress']['partial'] = not complete
 
-    store['rows'] = rows
-    store['from'] = date_from
-    store['to'] = date_to
     store['fetched_at'] = datetime.now().isoformat()
     store['linked'] = linked
 
     his['last_fetch'] = store['fetched_at']
     his['last_rows'] = len(rows)
+    his['last_duration'] = round(time.time() - started, 1)
     his['error'] = None
     return len(rows)
 
@@ -479,7 +588,12 @@ def fetch_and_report():
     """A fetch nobody is waiting on — the error goes to the status line."""
     try:
         count = his_fetch_once()
-        print(f"[*] HIS fetch: {count} rows at {his['last_fetch']}")
+        print(f"[*] HIS fetch: {count} rows in {his['last_duration']}s "
+              f"at {his['last_fetch']}")
+    except HISCancelled:
+        # The viewer moved the dates or signed out. Nothing went wrong, and the
+        # fetch that overtook this one is already saying what is happening.
+        print('[*] HIS fetch overtaken — stopping it.')
     except HISAuthError as e:
         his['logged_in'] = False
         his['client'].logout()
@@ -511,6 +625,10 @@ def _his_poll_task():
             interval = his['client'].config['poll_interval']
             if failures:
                 interval = min(interval * min(failures, 5), 1800)
+            # A year takes longer to fetch than the refresh interval, and a
+            # board that is always fetching is a board nobody else can query
+            # against. Wait at least as long as the last one took.
+            interval = max(interval, his['last_duration'])
             for _ in range(int(interval)):
                 if not his['logged_in']:
                     break
@@ -618,6 +736,8 @@ def his_fetch_now():
         return jsonify({'error': 'Not signed in to the HIS.'}), 401
     try:
         count = his_fetch_once()
+    except HISCancelled:
+        return jsonify({'ok': True, 'rows': len(store['rows']), 'overtaken': True})
     except HISAuthError as e:
         his['logged_in'] = False
         his['client'].logout()
@@ -634,6 +754,19 @@ def his_config():
     his['client'].update_config(data)
     save_his_config()
     return jsonify({'ok': True, 'config': his['client'].config})
+
+
+@app.route('/api/cache/clear', methods=['POST'])
+def his_cache_clear():
+    """Throw away every remembered chunk.
+
+    Here because the cache is the one thing the dashboard writes down that is
+    nobody else's business, so whoever sets the PC up needs a way to empty it
+    without going looking for the folder.
+    """
+    cache = his['client'].cache
+    dropped = cache.clear() if cache else 0
+    return jsonify({'ok': True, 'dropped': dropped, 'cache': cache_stats()})
 
 
 @app.route('/api/view', methods=['GET', 'POST'])

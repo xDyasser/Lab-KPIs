@@ -129,6 +129,25 @@ button.primary:hover:not(:disabled) { filter: brightness(1.06); background: var(
 .segmented button[aria-pressed="true"] { background: var(--series); color: #fff; font-weight: 600; }
 .filters label { font-size: 12px; color: var(--muted); }
 
+/* ── the progress strip ──────────────────────────────────
+   A year is fetched a week at a time and takes minutes, so the board says how
+   far along it is. Text first — the bar underneath is the same news in a
+   second form, never the only form. */
+.progress {
+  padding: 8px 20px; border-bottom: 1px solid var(--border);
+  background: var(--surface); font-size: 12px; color: var(--ink-2);
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
+.progress .track {
+  flex: 1 1 160px; min-width: 120px; height: 6px; border-radius: 3px;
+  background: var(--border); overflow: hidden;
+}
+.progress .fill {
+  display: block; height: 100%; background: var(--series);
+  transition: width .3s ease;
+}
+.progress .note { color: var(--muted); }
+
 /* ── layout ──────────────────────────────────────────── */
 main { padding: 16px 20px 40px; }
 .tiles {
@@ -204,6 +223,7 @@ td.wrap { white-space: normal; min-width: 240px; }
 .panel p.hint { margin: 0 0 18px; font-size: 13px; color: var(--muted); }
 .field { margin-bottom: 12px; }
 .field label { display: block; font-size: 12px; color: var(--ink-2); margin-bottom: 4px; }
+.field p.hint { margin: 4px 0 0; font-size: 11px; line-height: 1.45; color: var(--muted); }
 .field input, .field select { width: 100%; }
 .error {
   border-left: 3px solid var(--critical);
@@ -243,6 +263,14 @@ details.advanced summary { font-size: 12px; color: var(--muted); cursor: pointer
   <select id="deptSel"><option value="">All departments</option></select>
   <span class="spacer"></span>
   <button id="tableToggle" type="button" aria-pressed="false">Table view</button>
+</div>
+
+<!-- How far through a wide span the fetch is. Hidden when there is nothing to
+     say, which is most of the time — a day arrives before anyone reads this. -->
+<div class="progress" id="progress" role="status" aria-live="polite" hidden>
+  <span id="progressText"></span>
+  <span class="track"><span class="fill" id="progressFill" style="width:0%"></span></span>
+  <span class="note" id="progressNote"></span>
 </div>
 
 <main>
@@ -295,6 +323,32 @@ details.advanced summary { font-size: 12px; color: var(--muted); cursor: pointer
         <label for="browserPath">Browser for signing in (blank = the one on this PC)</label>
         <input id="browserPath">
       </div>
+      <!-- Waiting for the HIS. A day of the main report takes about two
+           minutes and a month about ten, so a wide span is fetched in pieces
+           and the pieces are remembered. These are the two knobs for that. -->
+      <div class="field">
+        <label for="chunkDays">Fetch in chunks of (days — 0 asks for the whole span at once)</label>
+        <input id="chunkDays" type="number" min="0" max="366" step="1">
+      </div>
+      <div class="field">
+        <label for="chunkWorkers">Chunks at once (higher is faster here and slower for everyone else on the HIS)</label>
+        <input id="chunkWorkers" type="number" min="1" max="8" step="1">
+      </div>
+      <div class="field">
+        <label for="reportTimeout">Wait for the HIS (seconds per chunk)</label>
+        <input id="reportTimeout" type="number" min="30" step="30">
+      </div>
+      <div class="field">
+        <label><input type="checkbox" id="cacheEnabled" style="width:auto"> Remember fetched chunks on this PC</label>
+        <p class="hint" id="cacheNote">Makes a repeated wide range quick. It writes report rows —
+          patient data — under data/cache on this PC; nothing else the dashboard
+          does touches the disk. The last few days are never kept.</p>
+      </div>
+      <div class="field">
+        <label for="cacheDays">Keep a remembered chunk for (days)</label>
+        <input id="cacheDays" type="number" min="0" max="3650" step="1">
+      </div>
+      <button type="button" id="clearCache">Clear remembered chunks</button>
       <div class="field">
         <label><input type="checkbox" id="verifySsl" style="width:auto"> Verify the HIS certificate</label>
       </div>
@@ -741,6 +795,39 @@ function render() {
   $('stamp').textContent = data.fetched_at
     ? 'Updated ' + new Date(data.fetched_at).toLocaleTimeString()
     : '';
+
+  renderProgress(data.progress || {});
+}
+
+/** How far through a wide span the fetch has got.
+ *
+ *  A year is 53 weekly chunks and minutes of waiting, so an empty board with no
+ *  explanation reads as broken. This says which chunk it is on, how many came
+ *  off this PC rather than the HIS, and — while the numbers below are only part
+ *  of the span — that they are not the whole answer yet. */
+function renderProgress(p) {
+  const strip = $('progress');
+  if (!p.active && !p.partial) { strip.hidden = true; return; }
+  strip.hidden = false;
+
+  const total = p.total || 0;
+  const done = p.done || 0;
+  const pct = total ? Math.round((done / total) * 100) : 0;
+  $('progressFill').style.width = pct + '%';
+
+  if (p.active) {
+    $('progressText').textContent = total > 1
+      ? `${p.phase || 'Fetching'} — chunk ${done} of ${total} (${pct}%)`
+      : (p.phase || 'Fetching') + '…';
+  } else {
+    $('progressText').textContent =
+      `Stopped after ${done} of ${total} chunks — the numbers below are part of the range, not all of it.`;
+  }
+
+  const notes = [];
+  if (p.rows) notes.push(`${fmt(p.rows)} rows so far`);
+  if (p.cached) notes.push(`${p.cached} chunk${p.cached === 1 ? '' : 's'} off this PC`);
+  $('progressNote').textContent = notes.join(' · ');
 }
 
 /** Every chart's numbers, readable without seeing colour at all. */
@@ -815,12 +902,38 @@ function renderHis() {
   setIfIdle('loginSite', c.login_site);
   setIfIdle('pollInterval', c.poll_interval);
   setIfIdle('browserPath', c.browser_path);
+  setIfIdle('chunkDays', c.chunk_days);
+  setIfIdle('chunkWorkers', c.chunk_workers);
+  setIfIdle('reportTimeout', c.timeout);
+  setIfIdle('cacheDays', c.cache_days);
   if (document.activeElement !== $('verifySsl')) $('verifySsl').checked = c.verify_ssl !== false;
+  if (document.activeElement !== $('cacheEnabled')) $('cacheEnabled').checked = c.cache_enabled !== false;
+
+  const cache = s.cache || {};
+  $('clearCache').textContent = cache.chunks
+    ? `Clear remembered chunks (${cache.chunks}, ${mb(cache.bytes)})`
+    : 'Clear remembered chunks (nothing kept)';
+  $('clearCache').disabled = !cache.chunks;
+}
+
+/** Bytes as the megabytes somebody would say out loud. */
+function mb(bytes) {
+  const value = (bytes || 0) / (1024 * 1024);
+  return value < 0.1 ? '<0.1 MB' : value.toFixed(1) + ' MB';
 }
 
 function setIfIdle(id, value) {
   const node = $(id);
   if (node && document.activeElement !== node && value !== undefined && node.value === '') node.value = value ?? '';
+}
+
+/** A number box read back for the server: blank means "leave it alone", and 0
+ *  is a real answer (chunking off), so it cannot go through `|| undefined`. */
+function num(id) {
+  const raw = $(id).value.trim();
+  if (raw === '') return undefined;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : undefined;
 }
 
 function showError(message) {
@@ -940,12 +1053,28 @@ $('saveSettings').addEventListener('click', async () => {
       base_url: $('baseUrl').value,
       auth_url: $('authUrl').value,
       login_site: $('loginSite').value,
-      poll_interval: Number($('pollInterval').value) || undefined,
+      poll_interval: num('pollInterval'),
       browser_path: $('browserPath').value,
       verify_ssl: $('verifySsl').checked,
+      chunk_days: num('chunkDays'),
+      chunk_workers: num('chunkWorkers'),
+      timeout: num('reportTimeout'),
+      cache_enabled: $('cacheEnabled').checked,
+      cache_days: num('cacheDays'),
     });
     showError('');
     alert('Settings saved.');
+  } catch (e) { showError(e.message); }
+});
+
+$('clearCache').addEventListener('click', async () => {
+  if (!confirm('Forget every chunk kept on this PC? The next wide range is fetched from the HIS again, which takes a while.'))
+    return;
+  try {
+    const out = await api('/api/cache/clear', {});
+    showError('');
+    alert(`Cleared ${out.dropped} remembered chunk${out.dropped === 1 ? '' : 's'}.`);
+    await pull();
   } catch (e) { showError(e.message); }
 });
 

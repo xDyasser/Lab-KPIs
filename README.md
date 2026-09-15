@@ -45,7 +45,8 @@ If the HIS ever refuses the replay (a password change, for instance), the hidden
 browser signs in again by itself from the credentials held in memory.
 
 The password is held **in the server's memory only** and is never written to
-disk; `data/his_config.json` holds settings, nothing else. After a restart, sign
+disk; `data/his_config.json` holds settings, nothing else. (`data/cache` does
+hold report rows once the disk cache is on — see *Waiting for the HIS*.) After a restart, sign
 in again.
 
 **Requirements:** Microsoft Edge or Google Chrome on the PC running the
@@ -68,7 +69,13 @@ which has no address bar).
 | Report API URL | HIS REST host. Default `…:8026`. |
 | Sign-in API URL | Authentication host — a different port: `…:8006`. Used for the token renewals. |
 | Site | The site everyone signs in to. Default *Almoosa Specialist Hospital*. |
-| Refresh every | Seconds between fetches (minimum 30; default 300). |
+| Refresh every | Seconds between fetches (minimum 30; default 300). A fetch that takes longer than this is never started again before it has finished. |
+| Fetch in chunks of | Days per request when the span is wider (default 7). `0` asks for the whole span in one request. See *Waiting for the HIS*. |
+| Chunks at once | How many chunks are in flight together (default 3, maximum 8). Higher is faster here and slower for everyone else on the HIS. |
+| Wait for the HIS | Seconds before one chunk is given up on (default 240). |
+| Remember fetched chunks | The disk cache. On by default. It writes report rows to this PC — see *Waiting for the HIS*. |
+| Keep a remembered chunk for | Days before a cached chunk is fetched again anyway (default 30). |
+| Clear remembered chunks | Empties `data/cache` now. The button says how much is in there. |
 | Browser for signing in | Blank uses the Edge/Chrome found on this PC; set a full path to pick one. |
 | Verify the HIS certificate | Turn off only if the HIS presents an internal certificate that the PC does not trust. (The hidden browser then ignores it too.) |
 
@@ -136,12 +143,74 @@ the board is a change to `build_kpis()` in `app.py`.
 
 There is no local database. The span the viewer picks is what the HIS is asked
 for, so looking further back is a wider query rather than a longer memory, and
-every number on the board is the HIS's own. The range buttons go to a year; past
-that the report is slower than anyone will wait.
+every number on the board is the HIS's own. The range buttons go to a year.
 
-The cost is that a wide span is a slow fetch. If a year turns out to take too
-long to sit behind the same Refresh as a day, the fix is to move the long ranges
-onto a button of their own rather than to start keeping a copy.
+## Waiting for the HIS
+
+The live HIS answers **one day of the main report in about two minutes, and a
+month in about ten**. A year asked for in one request does not come back at all:
+the report times out, and the board looks broken rather than busy. Three things
+between them make a year possible.
+
+### Chunks
+
+A span wider than *Fetch in chunks of* is not one request. It is cut into chunks
+of that many days and the chunks are asked for separately, so every individual
+request stays inside a length the HIS will actually answer.
+
+Two details matter. The chunks **share their boundary day** — the 1st–8th, then
+the 8th–15th — because nothing here knows whether the report counts its
+`TO_DATE` as inside the range; overlapping costs one repeated day per chunk,
+which is thrown away by the dedupe, while a gap would silently lose one. And the
+boundaries sit on a **fixed grid of whole chunks since the epoch**, not on the
+dates the viewer happened to pick, which is what makes the cache below worth
+having: today's year and tomorrow's year differ only at their two ends.
+
+The rows arrive on the board as their chunk lands, so a year fills in rather
+than showing nothing for an hour. The strip under the date buttons says which
+chunk it is on, and says plainly when what is on screen is only part of the
+range.
+
+### Chunk size tuning
+
+A chunk that times out anyway is **halved and tried again**, down to *chunk_min_days*
+(one day), and the narrower size is then applied to every chunk still to come —
+so one slow patch of the year costs one wasted wait, not fifty. A chunk that
+times out at one day is a real error and is reported as one: the HIS is too slow
+for that day, and the answer is a longer *Wait for the HIS* or a narrower range,
+not more splitting.
+
+*Chunks at once* fetches several of them together. The HIS spends those two
+minutes working rather than talking, so three at a time is roughly three times
+the span in the same wall clock — and also three times the load on a report
+server the whole hospital shares, which is why it defaults to 3 and stops at 8.
+Set it to 1 for a strictly sequential fetch.
+
+### The disk cache
+
+**This is the one place the dashboard writes patient data down.** Everything
+else here — the password, the token, the fetched rows — lives in memory only and
+goes when the program closes. The cache does not: it keeps each fetched chunk's
+rows under `data/cache`, gzipped, in a folder created readable only by the
+account running the dashboard. It is what makes the *second* year cost only the
+days since the first.
+
+A chunk is reused only when it is asking the same question: the same report over
+the same two dates, built from the same report definition — the definition
+file's own bytes are hashed into the key, so editing `reports/samples_received.json`
+retires its cache rather than serving rows the new definition would not have
+asked for.
+
+And only when it has stopped changing. A sample received on Monday can be
+accepted on Thursday, and that acceptance rewrites Monday's row, so **any chunk
+touching the last two days is always fetched again**, however recently it was
+written. Beyond that a chunk is trusted for thirty days. The cache is capped at
+512 MB and the chunks nobody has read for longest go first.
+
+Turning *Remember fetched chunks* off in Advanced stops it being written at all,
+and *Clear remembered chunks* empties it. If that trade is not one this hospital
+wants to make, turn it off: the chunking above still works without it, and a
+year is still a fetch that finishes — just every time.
 
 ## The charts
 
