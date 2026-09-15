@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+venv/
+build/
+dist/
+*.spec
+
+# Settings, the window's browser profile and anything else this PC has learned.
+# Nothing here belongs to anyone but the machine it is on.
+data/
