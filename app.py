@@ -7,6 +7,13 @@ sample number. Everything is worked out from the rows as they arrive: there is
 no local database, so "look further back" means asking the HIS for a wider
 span, and the numbers are always the HIS's own.
 
+A wider span is also a much slower one — the HIS answers a day of the main
+report in about two minutes and a month in about ten — so a span is cut into
+chunks the report can actually finish, and the chunks that have already come
+back are kept under data/cache so the next year costs only the days since the
+last. That cache is the one thing here written to disk that is patient data;
+see "Waiting for the HIS" in the README, and the switch for it in Advanced.
+
 Signing in is the Pending dashboard's proven path, unchanged: a browser with no
 window fills in the portal's real login page, and the encrypted sign-in body it
 posts is kept in memory so the hour-old token renews itself in silence.
@@ -18,8 +25,10 @@ reach. The page asks for its numbers over plain HTTP instead, and a heartbeat
 from it is what tells the server the window is still open.
 """
 
+import concurrent.futures
 import json
 import os
+import re
 import socket
 import statistics
 import subprocess
@@ -34,7 +43,8 @@ from flask import Flask, jsonify, render_template, request
 
 import browser_login
 import his_client
-from his_client import HISAuthError, HISClient, HISError, parse_datetime
+from his_client import (HISAuthError, HISCancelled, HISClient, HISError,
+                        parse_datetime)
 
 
 # ─────────────────────────────────────────────
@@ -61,6 +71,12 @@ BASE_DIR = _base_dir()
 DATA_DIR = _data_dir()
 HIS_CONFIG_FILE = os.path.join(DATA_DIR, 'his_config.json')
 VIEW_FILE = os.path.join(DATA_DIR, 'view.json')
+# The expected turnaround per test, typed in on the TAT tabs.
+TARGETS_FILE = os.path.join(DATA_DIR, 'targets.json')
+# Fetched report chunks, kept between runs so a year costs a year once. This is
+# the one place the dashboard writes patient data down — see "Waiting for the
+# HIS" in the README, and the switch for it in Advanced.
+CACHE_DIR = os.path.join(DATA_DIR, 'cache')
 
 app = Flask(
     __name__,
@@ -98,6 +114,25 @@ COL_ACCEPTED_BY = 'SAMPLE_ACCEPTANCE_BY'
 COL_ACCEPT_DEPT = 'DEPARTMENT_SAMPLE_ACCEPTANCE_BY'
 COL_SITE = 'SITE_NAME'
 
+# The linked reports the four KPI tabs are built from, by file name. Each tab
+# reads that report's own rows rather than the columns joined onto the samples:
+# a rejection or a critical result is a row per analyte, and the join keeps only
+# the first of them (see join_linked_reports), which is the whole sample's story
+# but not each test's.
+REPORT_REJECTIONS = 'sample_rejections'
+REPORT_CRITICAL = 'critical_results'
+REPORT_STAT = 'stat_tests'
+REPORT_RESULT_TIME = 'result_time'
+REPORT_COLLECTION = 'specimen_collection'
+
+# Where a department can be read off the collection report. It is the second
+# place a sample number is looked up when the main report has never heard of it
+# — a rejected sample is often never received, so it is missing from the list of
+# samples received but present in the list of samples collected. The HIS spells
+# the column differently between report versions, so the first of these the rows
+# actually carry is the one used.
+DEPT_COLUMNS = ('DEPARTMENT_NAME', 'DEPARTMENT', 'DEPT_NAME', 'DEPARTMENTNAME')
+
 
 def column(row, name, default=''):
     """Read a column, forgiving the HIS's spacing and underscores."""
@@ -119,8 +154,9 @@ def text(row, name):
 # ─────────────────────────────────────────────
 # THE FETCHED ROWS
 # One span's worth of the HIS, held in memory. Refetched when the viewer moves
-# the dates and on every poll; never written to disk, because it is patient data
-# and because the HIS is the only copy worth trusting.
+# the dates and on every poll — the HIS is the only copy worth trusting, so
+# nothing here is ever the source of a number. The chunks behind it may be
+# remembered on disk (cache.py); these assembled rows are not.
 # ─────────────────────────────────────────────
 store = {
     'rows': [],
@@ -128,6 +164,23 @@ store = {
     'to': None,
     'fetched_at': None,
     'linked': {},      # report name → how many of its rows found a sample
+    # Every linked report's own rows, as they came back. The KPI tabs are built
+    # from these: one sample's rejection has a row per analyte and the join onto
+    # the samples keeps only the first, so a tab that counts reasons or filters
+    # by service name has to read the report itself.
+    'linked_rows': {},
+    # Bumped by every fetch of the main report. A linked report fetched on
+    # demand records the stamp its rows belong to, so a report already joined
+    # onto the rows now on the board is not fetched a second time, and one left
+    # over from the span before is.
+    'stamp': 0,
+    'linked_stamp': {},
+    # A wide span arrives a chunk at a time and a year takes a while, so the
+    # board says how far along it is rather than sitting blank. `partial` marks
+    # rows that are only some of the span — the numbers under them are real but
+    # not yet the whole answer.
+    'progress': {'active': False, 'done': 0, 'total': 0, 'cached': 0,
+                 'fetched': 0, 'rows': 0, 'partial': False, 'phase': ''},
 }
 
 # What the viewer is looking at. A span in days rather than two dates, so the
@@ -135,9 +188,21 @@ store = {
 view = {
     'days_back': 7,
     'days_ahead': 0,
-    'site': '',        # '' means every site
     'department': '',
+    # One chosen test per tab, because a tab is a different report with its own
+    # spelling of the name — 'SERVICE_NAME' on the rejections, 'TEST_NAME' on
+    # the STAT report — and a name picked on one is rarely a name on another.
+    # '' means every test. Keyed by tab id: overview, rejections, critical,
+    # referred_tat, inhouse_tat.
+    'tests': {},
 }
+
+# A test's expected turnaround, in minutes, keyed by the test's name flattened
+# through match_key(). One list, shared by both TAT tabs, edited on the tabs
+# themselves and kept next to the view settings. A test nobody has set a time
+# for is measured against DEFAULT_TARGET rather than left out.
+DEFAULT_TARGET = 60
+targets = {}
 
 
 def load_view():
@@ -173,15 +238,59 @@ def clean_view():
     # dashboard looks broken rather than busy.
     view['days_back'] = max(0, min(view['days_back'], 366))
     view['days_ahead'] = max(0, min(view['days_ahead'], 7))
-    view['site'] = str(view.get('site') or '')
     view['department'] = str(view.get('department') or '')
+    chosen = view.get('tests')
+    view['tests'] = {str(k): str(v or '') for k, v in chosen.items()} if isinstance(chosen, dict) else {}
+
+
+def load_targets():
+    if not os.path.exists(TARGETS_FILE):
+        return
+    try:
+        with open(TARGETS_FILE, 'r', encoding='utf-8') as f:
+            saved = json.load(f)
+    except Exception as e:
+        print(f"[!] Could not read {TARGETS_FILE}: {e}")
+        return
+    if isinstance(saved, dict):
+        targets.update(clean_targets(saved))
+
+
+def save_targets():
+    try:
+        with open(TARGETS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(targets, f, indent=2, sort_keys=True)
+    except Exception as e:
+        print(f"[!] Could not write {TARGETS_FILE}: {e}")
+
+
+def clean_targets(raw):
+    """Minutes per test, keyed the way match_key spells a test name.
+
+    A blank or a nonsense figure drops the test back to the default rather than
+    being kept as a zero — a target of no minutes would fail every sample.
+    """
+    out = {}
+    for name, minutes in raw.items():
+        key = match_key(name)
+        if not key:
+            continue
+        try:
+            value = int(round(float(minutes)))
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            out[key] = min(value, 60 * 24 * 14)
+    return out
+
+
+def target_for(name):
+    return targets.get(match_key(name), DEFAULT_TARGET)
 
 
 def visible_rows():
     """The fetched rows the viewer has asked to see."""
     rows = store['rows']
-    if view['site']:
-        rows = [r for r in rows if text(r, COL_SITE) == view['site']]
     if view['department']:
         rows = [r for r in rows if text(r, COL_DEPARTMENT) == view['department']]
     return rows
@@ -221,12 +330,13 @@ def bucket_for(minutes):
 
 
 def summarise(values):
-    """Median and 90th percentile of a list of numbers, rounded to the minute."""
+    """Average, median and 90th percentile of a list, rounded to the minute."""
     if not values:
-        return {'median': None, 'p90': None, 'count': 0}
+        return {'mean': None, 'median': None, 'p90': None, 'count': 0}
     ordered = sorted(values)
     index = min(len(ordered) - 1, int(round(0.9 * (len(ordered) - 1))))
     return {
+        'mean': round(sum(ordered) / len(ordered)),
         'median': round(statistics.median(ordered)),
         'p90': round(ordered[index]),
         'count': len(ordered),
@@ -240,8 +350,12 @@ def counts_by(rows, col, limit=None):
 
 
 def build_kpis():
-    """Everything the page draws, worked out from the rows now in memory."""
+    """Everything the overview tab draws, from the rows now in memory."""
     rows = visible_rows()
+    # The overview has a test picker of its own, spelled the main report's way.
+    chosen = (view['tests'].get('overview') or '').strip()
+    if chosen:
+        rows = [r for r in rows if text(r, COL_TEST) == chosen]
 
     delays = []            # collection → acceptance, in minutes
     entry_delays = []      # entry (order) → acceptance
@@ -282,6 +396,8 @@ def build_kpis():
         days = [{'label': k, 'value': v} for k, v in sorted(per_day.items())]
 
     return {
+        'tests': sorted({text(r, COL_TEST) for r in visible_rows() if text(r, COL_TEST)}),
+        'test': chosen,
         'totals': {
             'samples': len(rows),
             'patients': len({text(r, COL_MRN) for r in rows if text(r, COL_MRN)}),
@@ -313,6 +429,450 @@ def build_kpis():
     }
 
 
+# ─────────────────────────────────────────────
+# THE FOUR KPI TABS
+# Rejections, critical results, and turnaround split two ways. Each is built
+# from one linked report's own rows rather than from the columns joined onto the
+# samples: those reports carry a row per analyte, and the join keeps only the
+# first of them, which describes the sample but not each test on it.
+#
+# A tab's rows are not narrowed to the samples the main report brought back.
+# They cannot be: a rejected sample is often never accepted, so it never reaches
+# the list of samples received, and an intersection quietly throws away the very
+# rows the rejections tab exists to count. Instead each row is given the
+# department of its sample number — looked up in the main report, then in the
+# collection report — exactly the way the Lab Analytics app labels its KPI tabs.
+# A row whose sample neither report mentions keeps its place and is counted as
+# unmatched; it only drops out when a department has been picked, because then
+# there is no honest way to say it belongs.
+# ─────────────────────────────────────────────
+TABS = {
+    'rejections': {'report': REPORT_REJECTIONS, 'key': 'LIS_SAMPLE_NO', 'test': 'SERVICE_NAME'},
+    'critical': {'report': REPORT_CRITICAL, 'key': 'SAMPLE_NO', 'test': 'TEST_NAME'},
+    'inhouse_tat': {'report': REPORT_STAT, 'key': 'SAMPLE_NO', 'test': 'TEST_NAME'},
+    'referred_tat': {'report': REPORT_RESULT_TIME, 'key': 'LIS_SAMPLE_NO', 'test': 'SERVICE_NAME'},
+}
+
+# Every report a tab needs before it has anything honest to show. Its own is
+# the first; the rejections tab also needs the collection report, because a
+# rejected sample is often never accepted and so never reaches the main report
+# at all — without it, picking a department empties the very tab that exists to
+# count those samples. The other three count rows whose samples were received,
+# which the main report already accounts for.
+TAB_REPORTS = {
+    'rejections': (REPORT_REJECTIONS, REPORT_COLLECTION),
+    'critical': (REPORT_CRITICAL,),
+    'inhouse_tat': (REPORT_STAT,),
+    'referred_tat': (REPORT_RESULT_TIME,),
+}
+
+# The linked reports somebody has asked to see. Each one costs its own pass over
+# the span — six reports is six times the wait, and a year is an afternoon — so
+# nothing but the main report is fetched until a tab's Show button asks for it.
+# Once asked for, a report stays asked for: every poll and every new span
+# refetches it, so the tab stays live rather than emptying under whoever is
+# reading it. Show again turns it back off.
+wanted_reports = set()
+# The ones being fetched right now, so a tab can say "fetching" rather than
+# showing a board of zeros.
+loading_reports = set()
+
+
+def tab_state(tab):
+    """Where a tab stands: nothing asked for, fetching, or fetched.
+
+    'ready' means its reports have been fetched over the span now on the board —
+    with an error of their own, possibly, which the tab shows separately. A
+    report that is wanted but has not come back yet reads as 'loading' whether
+    it is being fetched this second or queued behind the main report.
+    """
+    reports = TAB_REPORTS.get(tab) or ()
+    if all(store['linked_stamp'].get(name) == store['stamp'] for name in reports):
+        return 'ready'
+    if any(name in loading_reports or name in wanted_reports for name in reports):
+        return 'loading'
+    return 'idle'
+
+
+def tab_title(tab):
+    known = his_client.list_reports()
+    spec = TABS.get(tab) or {}
+    meta = known.get(spec.get('report')) or {}
+    return meta.get('title') or spec.get('report') or tab
+
+
+# How long after the machine had the result somebody signed it off. The lab's
+# own line is a quarter of an hour, which is why fifteen and thirty minutes get
+# counted rather than just charted.
+CRITICAL_LATE = (15, 30)
+CRITICAL_BUCKETS = [
+    ('Under 15 min', 0, 15),
+    ('15–30 min', 15, 30),
+    ('30–60 min', 30, 60),
+    ('1–4h', 60, 240),
+    ('Over 4h', 240, None),
+]
+
+TAT_BUCKETS = [
+    ('Under 30 min', 0, 30),
+    ('30–60 min', 30, 60),
+    ('1–2h', 60, 120),
+    ('2–4h', 120, 240),
+    ('Over 4h', 240, None),
+]
+
+_HMS = re.compile(r'(\d+)\s*(hour|min|sec)', re.I)
+
+
+def parse_hms(value):
+    """Minutes out of the HIS's '0 Hours -23 Minutes -51 Seconds' text.
+
+    Report 1044 hands its turnaround over already worked out, but spelled as
+    words with dashes between the parts. A row the report could not work out
+    comes back as ' Hours  Minutes  Seconds' with the numbers missing, which is
+    not a turnaround of zero and is left out instead.
+    """
+    found = {}
+    for number, unit in _HMS.findall(str(value or '')):
+        found.setdefault(unit.lower(), int(number))
+    if not found:
+        return None
+    return found.get('hour', 0) * 60 + found.get('min', 0) + found.get('sec', 0) / 60.0
+
+
+def bucket_counts(values, buckets):
+    tally = Counter()
+    for minutes in values:
+        for label, low, high in buckets:
+            if minutes >= low and (high is None or minutes < high):
+                tally[label] += 1
+                break
+        else:
+            tally[buckets[-1][0]] += 1
+    return [{'label': label, 'value': tally.get(label, 0)} for label, _, _ in buckets]
+
+
+def classification():
+    """Which samples the lab ran itself, and which it sent on.
+
+    The main report carries two departments: the one the sample belongs to and
+    the one that accepted it. The same on both means the lab ran the test
+    itself; a different one means the sample was referred. Either of them blank
+    says nothing either way, so those samples are left out of both TAT tabs
+    rather than counted as in house by default.
+
+    Two maps come back, because the two TAT reports name tests differently. A
+    sample and test that the main report spells the same way is answered
+    exactly; anything else falls back to the sample, and only when every test on
+    that sample went the same way.
+    """
+    by_sample = defaultdict(set)
+    by_pair = {}
+    for row in visible_rows():
+        sample = text(row, COL_SAMPLE)
+        ours = match_key(text(row, COL_DEPARTMENT))
+        theirs = match_key(text(row, COL_ACCEPT_DEPT))
+        if not sample or not ours or not theirs:
+            continue
+        kind = 'in house' if ours == theirs else 'referred'
+        by_sample[sample].add(kind)
+        by_pair[(sample, match_key(text(row, COL_TEST)))] = kind
+    return by_sample, by_pair
+
+
+def kind_for(maps, sample, test=''):
+    by_sample, by_pair = maps
+    kind = by_pair.get((sample, match_key(test)))
+    if kind:
+        return kind
+    kinds = by_sample.get(sample)
+    if kinds and len(kinds) == 1:
+        return next(iter(kinds))
+    return None
+
+
+def collection_dept_column(rows):
+    """Which of DEPT_COLUMNS the collection report actually brought back."""
+    for row in rows[:50]:
+        for name in DEPT_COLUMNS:
+            if text(row, name):
+                return name
+    return None
+
+
+# The sample → department lookup, worked out once per set of fetched rows. Four
+# tabs ask for it and the main report can be a year of them, so it is not built
+# four times over.
+_dept_cache = {'key': None, 'value': None}
+
+
+def build_department_map():
+    """Every sample number the fetch saw, and the department it belongs to.
+
+    The main report answers first: it is the one that carries DEPARTMENT_NAME,
+    and it is the department the board's filter is spelled in. The collection
+    report fills the gaps — a sample rejected before it was ever accepted never
+    reaches the received list, so its rejection would otherwise be attached to
+    no department at all and vanish the moment somebody picks one.
+
+    Comes back with how many samples each report accounted for, and which
+    column the collection report's department was read from, so a tab can say
+    plainly when the second lookup had nothing to offer.
+    """
+    by_sample = {}
+    for row in store['rows']:
+        sample = text(row, COL_SAMPLE)
+        dept = text(row, COL_DEPARTMENT)
+        if sample and dept:
+            by_sample.setdefault(sample, dept)
+    from_main = len(by_sample)
+
+    collected = store['linked_rows'].get(REPORT_COLLECTION) or []
+    col = collection_dept_column(collected)
+    if col:
+        for row in collected:
+            sample = str(column(row, 'SAMPLE_NO', '')).strip()
+            dept = text(row, col)
+            if sample and dept and sample not in by_sample:
+                by_sample[sample] = dept
+    return {
+        'by_sample': by_sample,
+        'from_main': from_main,
+        'from_collection': len(by_sample) - from_main,
+        'column': col,
+        'collection_rows': len(collected),
+    }
+
+
+def department_map():
+    key = (store['fetched_at'], len(store['rows']),
+           len(store['linked_rows'].get(REPORT_COLLECTION) or []))
+    if _dept_cache['key'] != key:
+        _dept_cache['key'] = key
+        _dept_cache['value'] = build_department_map()
+    return _dept_cache['value']
+
+
+def tab_rows(tab):
+    """A tab's report rows, labelled with their department and narrowed to its test.
+
+    Every row of the tab's own report is kept, not only those whose sample the
+    main report happens to mention — see the note above TABS. Picking a
+    department narrows to the rows that are known to belong to it; the ones no
+    report could place are counted and reported rather than folded in.
+
+    Returns the rows, the test names the tab could offer, the one chosen, how
+    many samples the board is showing, and the match tally. The choices are
+    worked out before the test filter is applied, or picking a test would leave
+    the dropdown holding only that test.
+    """
+    spec = TABS[tab]
+    depts = department_map()
+    wanted = view['department']
+    received = len({text(r, COL_SAMPLE) for r in visible_rows() if text(r, COL_SAMPLE)})
+
+    rows = []
+    matched = unmatched = dropped = 0
+    for row in (store['linked_rows'].get(spec['report']) or []):
+        sample = str(column(row, spec['key'], '')).strip()
+        dept = depts['by_sample'].get(sample)
+        if dept:
+            matched += 1
+        else:
+            unmatched += 1
+        if wanted and dept != wanted:
+            # Rows belonging to another department are simply not this
+            # department's. Rows belonging to no known department are a
+            # different thing, and the only ones worth reporting: they are left
+            # out because nothing could say where they belong.
+            if not dept:
+                dropped += 1
+            continue
+        rows.append(row)
+
+    names = sorted({text(r, spec['test']) for r in rows if text(r, spec['test'])})
+    chosen = (view['tests'].get(tab) or '').strip()
+    if chosen:
+        rows = [r for r in rows if text(r, spec['test']) == chosen]
+    tally = {
+        'matched': matched,
+        'unmatched': unmatched,
+        'dropped': dropped if wanted else 0,
+        'from_collection': depts['from_collection'],
+        'collection_column': depts['column'],
+        'collection_rows': depts['collection_rows'],
+    }
+    return rows, names, chosen, received, tally
+
+
+def tab_shell(tab, rows, names, chosen, received, tally, error=None):
+    return {'tab': tab, 'tests': names, 'test': chosen, 'rows': len(rows),
+            'received': received, 'match': tally, 'error': error,
+            # Whether this tab's report has been fetched at all, and what the
+            # fetch cost — a report asked one test at a time says how many tests
+            # it was asked for and how many of them it had never heard of.
+            'state': tab_state(tab), 'title': tab_title(tab),
+            'fetch': dict(store['linked'].get(TABS[tab]['report']) or {})}
+
+
+def linked_error(report):
+    """Whatever went wrong fetching this tab's report, if anything did."""
+    return (store['linked'].get(report) or {}).get('error')
+
+
+def build_rejections():
+    """Samples the lab turned away, and what it said about why."""
+    rows, names, chosen, received, tally = tab_rows('rejections')
+    out = tab_shell('rejections', rows, names, chosen, received, tally,
+                    linked_error(REPORT_REJECTIONS))
+    rejected = {str(column(r, 'LIS_SAMPLE_NO', '')).strip() for r in rows}
+    rejected.discard('')
+    out['totals'] = {
+        'rejected': len(rejected),
+        'lines': len(rows),
+        'received': received,
+        # A rate is only a rate against everything the lab received. Narrow the
+        # tab to one test and the denominator no longer matches the numerator —
+        # the rejection report names services the main report does not — so the
+        # figure is withheld rather than quietly wrong. Even across every test
+        # it is rejections measured against the received workload rather than a
+        # share of it: a sample rejected before it was ever accepted is in the
+        # numerator and not in the denominator.
+        'rate': (round(100.0 * len(rejected) / received, 2)
+                 if received and not chosen else None),
+    }
+    out['by_reason'] = counts_by(rows, 'REASON')
+    return out
+
+
+def build_critical():
+    """Critical results, and how long they sat between the machine and a name.
+
+    Measured from MACHINE_RESULT_TIME to SECOND_AUTH_DATETIME: the result
+    existed, and then somebody authorised it a second time. Fifteen and thirty
+    minutes are counted out because those are the lines the lab is held to.
+    """
+    rows, names, chosen, received, tally = tab_rows('critical')
+    out = tab_shell('critical', rows, names, chosen, received, tally,
+                    linked_error(REPORT_CRITICAL))
+    delays = []
+    per_test = defaultdict(list)
+    for row in rows:
+        minutes = minutes_between(row, 'MACHINE_RESULT_TIME', 'SECOND_AUTH_DATETIME')
+        if minutes is None:
+            continue
+        delays.append(minutes)
+        per_test[text(row, 'TEST_NAME') or 'Not stated'].append(minutes)
+
+    summary = summarise(delays)
+    out['totals'] = {
+        'results': len(rows),
+        'measured': summary['count'],
+        'mean': summary['mean'],
+        'median': summary['median'],
+        'over_15': sum(1 for m in delays if m > CRITICAL_LATE[0]),
+        'over_30': sum(1 for m in delays if m > CRITICAL_LATE[1]),
+        # Rows whose two stamps the HIS did not both fill in. They are still
+        # critical results; they just cannot be timed.
+        'untimed': len(rows) - summary['count'],
+    }
+    out['buckets'] = bucket_counts(delays, CRITICAL_BUCKETS)
+    out['by_test'] = sorted(
+        ({'label': name,
+          'value': len(values),
+          'mean': summarise(values)['mean'],
+          'median': summarise(values)['median'],
+          'over_15': sum(1 for m in values if m > CRITICAL_LATE[0]),
+          'over_30': sum(1 for m in values if m > CRITICAL_LATE[1])}
+         for name, values in per_test.items()),
+        key=lambda d: d['value'], reverse=True)
+    return out
+
+
+def build_tat(kind):
+    """Turnaround for the samples the lab ran itself, or for those it sent on.
+
+    In house reads the figure report 1044 has already worked out, sorting to
+    result entry. Referred is acceptance to authorisation on report 593, which
+    is where a sample that left the building comes back.
+
+    Each test is measured against its own expected time — the minutes typed in
+    on the tab — so "met" is per test rather than one line drawn across a
+    chemistry panel and a culture alike.
+    """
+    maps = classification()
+    if kind == 'in house':
+        tab, clock = 'inhouse_tat', 'Sorting to result entry (report 1044).'
+    else:
+        tab, clock = 'referred_tat', 'Acceptance to authorisation (report 593).'
+    spec = TABS[tab]
+    rows, names, chosen, received, tally = tab_rows(tab)
+    out = tab_shell(tab, rows, names, chosen, received, tally,
+                    linked_error(spec['report']))
+    out['clock'] = clock
+
+    per_test = defaultdict(list)
+    measured = []
+    other_kind = 0     # rows that belong to the other TAT tab
+    unclassified = 0   # samples whose two departments say nothing either way
+    untimed = 0        # rows with no usable turnaround on them
+    for row in rows:
+        sample = str(column(row, spec['key'], '')).strip()
+        name = text(row, spec['test'])
+        theirs = kind_for(maps, sample, name)
+        if theirs is None:
+            unclassified += 1
+            continue
+        if theirs != kind:
+            other_kind += 1
+            continue
+        if kind == 'in house':
+            minutes = parse_hms(column(row, 'TAT_SORT_TO_RESULT_ENTRY'))
+        else:
+            minutes = minutes_between(row, 'SAMPLE_ACCEPTANCE_TIME', 'AUTHORIZATION_DATE')
+        if minutes is None:
+            untimed += 1
+            continue
+        measured.append(minutes)
+        per_test[name or 'Not stated'].append(minutes)
+
+    summary = summarise(measured)
+    met = sum(1 for name, values in per_test.items()
+              for m in values if m <= target_for(name))
+    out['totals'] = {
+        'measured': summary['count'],
+        'tests': len(per_test),
+        'mean': summary['mean'],
+        'median': summary['median'],
+        'met': met,
+        'met_pct': round(100.0 * met / summary['count'], 1) if summary['count'] else None,
+        'other_kind': other_kind,
+        'unclassified': unclassified,
+        'untimed': untimed,
+    }
+    out['buckets'] = bucket_counts(measured, TAT_BUCKETS)
+    out['by_test'] = sorted(
+        ({'label': name,
+          'value': len(values),
+          'mean': summarise(values)['mean'],
+          'median': summarise(values)['median'],
+          'target': target_for(name),
+          'met': sum(1 for m in values if m <= target_for(name)),
+          'met_pct': round(100.0 * sum(1 for m in values if m <= target_for(name))
+                           / len(values), 1)}
+         for name, values in per_test.items()),
+        key=lambda d: d['value'], reverse=True)
+    return out
+
+
+def build_tabs():
+    return {
+        'rejections': build_rejections(),
+        'critical': build_critical(),
+        'inhouse_tat': build_tat('in house'),
+        'referred_tat': build_tat('referred'),
+    }
+
 def choices():
     """The sites and departments the fetched rows actually contain.
 
@@ -321,7 +881,6 @@ def choices():
     that no longer exist.
     """
     return {
-        'sites': sorted({text(r, COL_SITE) for r in store['rows'] if text(r, COL_SITE)}),
         'departments': sorted({text(r, COL_DEPARTMENT) for r in store['rows']
                                if text(r, COL_DEPARTMENT)}),
     }
@@ -330,11 +889,19 @@ def choices():
 def dashboard_payload():
     return {
         'kpis': build_kpis(),
+        'tabs': build_tabs(),
+        'targets': dict(targets),
+        'default_target': DEFAULT_TARGET,
         'choices': choices(),
         'view': dict(view),
         'range': {'from': store['from'], 'to': store['to']},
         'fetched_at': store['fetched_at'],
         'linked': store['linked'],
+        # Which of the other reports have been asked for, and which are on their
+        # way. Everything else about a tab is in its own payload.
+        'wanted': sorted(wanted_reports),
+        'loading': sorted(loading_reports),
+        'progress': dict(store['progress']),
     }
 
 
@@ -357,11 +924,23 @@ his = {
     'last_rows': 0,
     'last_error_at': None,
     'login_endpoint': None,
+    # Bumped by every new fetch. A year-wide fetch already running notices that
+    # it is no longer the current one and stops at its next chunk, instead of
+    # making the viewer wait out a span they have already moved off.
+    'generation': 0,
+    'last_duration': 0.0,
 }
+
+# Handing out fetch generations. Three threads can ask for one at once — the
+# poll loop, Refresh, and a moved date range.
+generation_lock = threading.Lock()
 
 # One fetch at a time. The poll loop, the Refresh button and a widened date
 # span can all ask at once, and the HIS is slow enough for that to overlap.
 fetch_lock = threading.Lock()
+
+# Where the fetched chunks are remembered between runs.
+his['client'].attach_cache(CACHE_DIR)
 
 
 def load_his_config():
@@ -397,6 +976,8 @@ def his_status_payload():
         'expires_in': client.seconds_left() if his['logged_in'] else 0,
         'last_fetch': his['last_fetch'],
         'last_rows': his['last_rows'],
+        'last_duration': his['last_duration'],
+        'cache': cache_stats(),
         'error': his['error'],
         'login_endpoint': his['login_endpoint'],
         'reports': his_client.list_reports(),
@@ -404,14 +985,213 @@ def his_status_payload():
     }
 
 
-def join_linked_reports(rows, date_from, date_to):
-    """Merge every other report in reports/ onto the main rows by sample number.
+def cache_stats():
+    """What is on disk, for the line in Advanced next to "Clear cache"."""
+    cache = his['client'].cache
+    if not cache:
+        return {'enabled': False, 'chunks': 0, 'bytes': 0}
+    stats = cache.stats()
+    stats['enabled'] = bool(his['client'].config.get('cache_enabled', True))
+    return stats
+
+
+def match_key(value):
+    """One spelling of a test name, so two reports' spacing cannot part them."""
+    return re.sub(r'\s+', ' ', str(value or '')).strip().upper()
+
+
+def main_test_names():
+    """The distinct test names the main report brought back, one spelling each.
+
+    What a report that has to be asked one test at a time is asked for. The two
+    sides are the same span, so these are the tests the linked report can have
+    anything to say about; a name it has never heard of simply answers nothing,
+    which is counted rather than mistaken for a slow day.
+    """
+    seen = {}
+    for row in store['rows']:
+        name = text(row, COL_TEST)
+        if name:
+            seen.setdefault(match_key(name), name)
+    return [seen[key] for key in sorted(seen)]
+
+
+def linked_passes(name, meta):
+    """Every request one linked report takes, and what each pass is pinned to.
+
+    Two things in a report's `_meta` turn it into more than one request:
+
+    `fan_out` — a mandatory filter with no "all" option. The rejection report
+    must name one hospital, so it is asked once per hospital and the hospital
+    that answered is carried into a column of its own.
+
+    `test_filter` — a report the HIS will not answer across every service.
+    Report 593 times out over a single day asked for all of them at once, so it
+    is asked one service at a time, for the test names the main report just
+    brought back. Nothing is pinned when there are no names yet, or when there
+    are more of them than `test_filter_max`: past a few hundred, one request per
+    test is slower than the one slow request it was meant to avoid, so the
+    report is asked the ordinary way and the tab says so.
+
+    Comes back as a list of passes, each {'filters', 'label', 'column', 'test'},
+    plus how the test filter was decided.
+    """
+    fan = meta.get('fan_out') or {}
+    passes = []
+    for one in (fan.get('values') or [None]):
+        filters = {}
+        label = None
+        if one is not None and fan.get('filter'):
+            value = one.get('value') if isinstance(one, dict) else one
+            label = one.get('label') if isinstance(one, dict) else one
+            # Pinned the way the portal pins a dropdown: the id it selects on
+            # and the name that was chosen, in case the report reads both.
+            filters[fan['filter']] = {'value': value, 'text': label}
+        passes.append({'filters': filters, 'label': label,
+                       'column': fan.get('column') or fan.get('filter'),
+                       'test': None})
+
+    spec = meta.get('test_filter') or {}
+    note = {'asked': 0, 'available': 0, 'skipped': ''}
+    if not spec.get('filter'):
+        return passes, note
+
+    names = main_test_names()
+    cap = int(his['client'].config.get('test_filter_max', 400))
+    note['available'] = len(names)
+    if not cap:
+        # Turned off in settings: ask the report the ordinary way and let it
+        # take as long as it takes.
+        note['skipped'] = 'turned off'
+        return passes, note
+    if not names:
+        # Nothing on the board to narrow by — the main report has not come back
+        # yet, or brought back no tests at all.
+        note['skipped'] = 'no tests'
+        return passes, note
+    if len(names) > cap:
+        note['skipped'] = 'too many tests'
+        return passes, note
+
+    note['asked'] = len(names)
+    spread = []
+    for one in passes:
+        for test in names:
+            filters = dict(one['filters'])
+            filters[spec['filter']] = {'value': test, 'text': test}
+            spread.append(dict(one, filters=filters, test=test))
+    return spread, note
+
+
+def fetch_linked_rows(name, meta, date_from, date_to, generation=None):
+    """One linked report's rows, chunked and cached like the main one.
+
+    A report that takes more than one request — one per hospital, or one per
+    test — has its passes run together, up to "Chunks at once" of them. That
+    setting is also the cap on requests actually in flight (see
+    HISClient._report_slot), so a report asked one test at a time does not
+    multiply into dozens of calls at once on a report server the whole hospital
+    shares.
+
+    One pass failing does not cost the rest: a service the HIS chokes on is
+    counted and reported under the tab rather than emptying it. Every pass
+    failing is a real error and is raised as one.
+    """
+    passes, note = linked_passes(name, meta)
+    title = meta.get('title') or name
+    rows = []
+    tally = {'passes': len(passes), 'done': 0, 'failed': 0, 'empty': 0,
+             'tests_asked': note['asked'], 'tests_available': note['available'],
+             'tests_skipped': note['skipped'], 'failed_error': ''}
+    lock = threading.Lock()
+
+    def phase():
+        if note['asked']:
+            return f"{title} — test {tally['done'] + 1} of {len(passes)}"
+        if len(passes) > 1:
+            return f"{title} — {tally['done'] + 1} of {len(passes)}"
+        return f'joining {name}'
+
+    def run(one):
+        part = his['client'].fetch_report_chunked(
+            name, date_from, date_to, filters=one['filters'] or None,
+            on_progress=lambda p: note_progress(p, phase()),
+            should_stop=stop_check(generation),
+        )
+        if one['label'] and one['column']:
+            for row in part:
+                row.setdefault(one['column'], one['label'])
+        with lock:
+            tally['done'] += 1
+            if not part:
+                tally['empty'] += 1
+            rows.extend(part)
+
+    def attempt(one):
+        try:
+            run(one)
+        except (HISCancelled, HISAuthError):
+            # Overtaken, or the session ended under it. Neither is this one
+            # service's problem and neither is worth trying the rest over.
+            raise
+        except HISError as e:
+            # One service the report will not answer for is one service missing
+            # from the tab, not an empty tab.
+            with lock:
+                tally['done'] += 1
+                tally['failed'] += 1
+                tally['failed_error'] = tally['failed_error'] or str(e)
+            print(f'[!] {name}: {one["test"] or one["label"] or "one pass"} failed: {e}')
+
+    workers = max(1, int(his['client'].config.get('chunk_workers', 3)))
+    if len(passes) == 1 or workers == 1:
+        for one in passes:
+            if stop_check(generation)():
+                raise HISCancelled('The fetch was overtaken by a newer one.')
+            attempt(one)
+    else:
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(workers, len(passes)),
+                thread_name_prefix='his-pass') as pool:
+            futures = [pool.submit(attempt, one) for one in passes]
+            try:
+                for future in concurrent.futures.as_completed(futures):
+                    future.result()   # only a cancelled or ended session gets here
+            except BaseException:
+                for future in futures:
+                    future.cancel()
+                raise
+
+    if tally['failed'] and tally['failed'] == len(passes):
+        raise HISError(tally['failed_error'] or f'The {name} report did not answer.')
+    return rows, tally
+
+
+def join_linked_reports(rows, date_from, date_to, generation=None, names=None):
+    """Merge some of the other reports in reports/ onto the main rows by sample number.
+
+    `names` is which of them: only the reports a tab has actually been asked to
+    show. Fetching one is its own pass over the span, so the rest are left
+    alone until somebody presses Show.
 
     A linked report adds its own columns to the sample it belongs to, prefixed
     with its name so two reports carrying a DEPARTMENT_NAME cannot overwrite
     each other. A sample a linked report does not mention is left as it is.
+
+    The main report has a row per test rather than per sample, so a linked
+    report that is also per test would otherwise land its last row on every
+    test of the sample. Such a report says so in its _meta as `match_column`,
+    naming the column on each side that has to agree as well as the sample
+    number. Without one, the first row a sample brings back is taken to
+    describe the whole sample, and a later row that disagrees is counted as
+    ambiguous rather than quietly preferred — that count is how you find out a
+    report needs a match_column.
+
+    `skip_columns` drops what is true of one row rather than of the sample: a
+    per-analyte result on a report that is joined by sample.
     """
     joined = {}
+    kept = {}
     index = defaultdict(list)
     for row in rows:
         key = text(row, COL_SAMPLE)
@@ -419,67 +1199,249 @@ def join_linked_reports(rows, date_from, date_to):
             index[key].append(row)
 
     for name, meta in his_client.list_reports().items():
-        if name == MAIN_REPORT:
+        if name == MAIN_REPORT or (names is not None and name not in names):
             continue
         key_column = meta.get('key_column') or COL_SAMPLE
+        pair = meta.get('match_column') or {}
+        their_column = pair.get('linked')
+        our_column = pair.get('main')
+        # SLNO is the report's own row numbering. It says nothing about the
+        # sample and changes with every chunk boundary, so it never joins.
+        skip = {key_column, 'SLNO'} | set(meta.get('skip_columns') or ())
         try:
-            extra = his['client'].fetch_report(name, date_from, date_to)
+            extra, fetched = fetch_linked_rows(name, meta, date_from, date_to, generation)
         except HISError as e:
             # One report being unavailable should not cost the whole board.
             print(f"[!] Linked report {name} failed: {e}")
-            joined[name] = {'rows': 0, 'matched': 0, 'error': str(e)}
+            joined[name] = {'rows': 0, 'matched': 0, 'ambiguous': 0, 'error': str(e)}
+            kept[name] = []
             continue
 
+        # The tabs read these rows directly: the join below keeps one row per
+        # sample, which is the sample's story but not each analyte's.
+        kept[name] = extra
         matched = 0
+        ambiguous = 0
+        taken = {}   # id(main row) → the linked row already written onto it
+        counts = {}  # id(main row) → how many linked rows it could have taken
         for extra_row in extra:
             key = str(column(extra_row, key_column, '')).strip()
             targets = index.get(key)
             if not targets:
                 continue
-            matched += 1
+            theirs = match_key(column(extra_row, their_column, '')) if their_column else None
+            landed = False
             for target in targets:
+                if their_column and match_key(column(target, our_column, '')) != theirs:
+                    continue
+                counts[id(target)] = counts.get(id(target), 0) + 1
+                held = taken.get(id(target))
+                if held is not None:
+                    # Two rows for the same sample, and nothing to tell the
+                    # dashboard which of them this test belongs to. The first
+                    # stands; the disagreement is reported rather than hidden.
+                    if held != extra_row:
+                        ambiguous += 1
+                    continue
+                taken[id(target)] = extra_row
+                landed = True
                 for field, value in extra_row.items():
-                    if field == key_column:
+                    if field in skip:
                         continue
-                    target[f'{name}.{field}'] = value
-        joined[name] = {'rows': len(extra), 'matched': matched, 'error': None}
-        print(f"[*] Linked {name}: {len(extra)} rows, {matched} matched a sample")
+                    # The HIS pads some columns out to their database width.
+                    target[f'{name}.{field}'] = value.strip() if isinstance(value, str) else value
+            if landed:
+                matched += 1
 
-    return joined
+        # How many of the report's rows each sample brought back. One is the
+        # ordinary case; more says the columns above describe the first of
+        # several — two critical results on one sample, say — so the board can
+        # show that rather than imply there was only ever one.
+        for row in rows:
+            seen = counts.get(id(row))
+            if seen:
+                row[f'{name}.ROWS'] = seen
+        joined[name] = dict(fetched, rows=len(extra), matched=matched,
+                            ambiguous=ambiguous, error=None)
+        asked = fetched.get('tests_asked') or 0
+        print(f"[*] Linked {name}: {len(extra)} rows, {matched} matched a sample"
+              + (f", {ambiguous} could not be told apart" if ambiguous else "")
+              + (f", asked one test at a time for {asked} tests"
+                 f" ({fetched.get('empty', 0)} of them it had nothing for)" if asked else "")
+              + (f", {fetched['failed']} pass(es) failed" if fetched.get('failed') else ""))
+
+    return joined, kept
+
+
+def stop_check(generation):
+    """A callable the fetch asks between chunks: am I still the current fetch?
+
+    A year is a long time to hold the viewer to a range they have moved off,
+    and longer still to make the next fetch queue behind. So a fetch that has
+    been overtaken — or a sign-out — stops where it is instead of finishing an
+    answer nobody is waiting for.
+    """
+    def stopped():
+        if generation is not None and his['generation'] != generation:
+            return True
+        return not his['logged_in']
+    return stopped
+
+
+def note_progress(payload, phase, partial=True):
+    """Publish how far along a fetch is, for the line under the date buttons."""
+    progress = store['progress']
+    progress.update(payload)
+    progress['phase'] = phase
+    progress['active'] = True
+    progress['partial'] = partial and payload.get('done', 0) < payload.get('total', 0)
 
 
 def his_fetch_once():
-    """Pull the reports once and rebuild the board. Returns the row count."""
+    """Pull the reports once and rebuild the board. Returns the row count.
+
+    A wide span is not one request. The HIS answers a day of the main report in
+    about two minutes and a month in ten, so a year asked for in one go times
+    out; it is fetched a chunk at a time instead, the chunks already on disk are
+    read back rather than asked for again, and the rows are put on the board as
+    they land so the board fills in rather than waiting an hour to appear.
+    """
     client = his['client']
     today = datetime.now().date()
     date_from = (today - timedelta(days=view['days_back'])).strftime('%Y-%m-%d')
     date_to = (today + timedelta(days=view['days_ahead'])).strftime('%Y-%m-%d')
 
+    # Claim the fetch before waiting for the lock, so an hour-long fetch still
+    # running sees that it has been overtaken and lets go.
+    with generation_lock:
+        his['generation'] += 1
+        generation = his['generation']
+    stopped = stop_check(generation)
+    started = time.time()
+
     with fetch_lock:
+        if stopped():
+            return len(store['rows'])
         his['fetching'] = True
+        # The board is rebuilt from this list on every poll of the page, so
+        # appending to it as the chunks land is what makes a year fill in.
+        rows = []
+        store['rows'] = rows
+        store['from'] = date_from
+        store['to'] = date_to
+        store['linked'] = {}
+        store['linked_rows'] = {}
+        store['linked_stamp'] = {}
+        store['stamp'] += 1
+        store['progress'] = {'active': True, 'done': 0, 'total': 0, 'cached': 0,
+                             'fetched': 0, 'rows': 0, 'partial': True,
+                             'phase': 'reading the report'}
+        complete = False
         try:
-            rows = client.fetch_report(MAIN_REPORT, date_from, date_to)
-            linked = join_linked_reports(rows, date_from, date_to)
+            client.fetch_report_chunked(
+                MAIN_REPORT, date_from, date_to,
+                on_rows=rows.extend,
+                on_progress=lambda p: note_progress(p, 'reading the report'),
+                should_stop=stopped,
+            )
+            # Only the reports a tab has been asked to show. Each is its own
+            # pass over the span, so a board nobody has opened a tab on costs
+            # one report rather than six.
+            linked, linked_rows = join_linked_reports(
+                rows, date_from, date_to, generation, sorted(wanted_reports))
+            complete = True
         finally:
             his['fetching'] = False
+            store['progress']['active'] = False
+            # A fetch that fell over part way leaves real rows on the board —
+            # just not all of them. Saying so is better than either hiding them
+            # or letting them pass for the whole span.
+            store['progress']['partial'] = not complete
 
-    store['rows'] = rows
-    store['from'] = date_from
-    store['to'] = date_to
     store['fetched_at'] = datetime.now().isoformat()
     store['linked'] = linked
+    store['linked_rows'] = linked_rows
+    store['linked_stamp'] = {name: store['stamp'] for name in linked}
 
     his['last_fetch'] = store['fetched_at']
     his['last_rows'] = len(rows)
+    his['last_duration'] = round(time.time() - started, 1)
     his['error'] = None
     return len(rows)
+
+
+def load_linked_now(names):
+    """Fetch some linked reports over the span already on the board.
+
+    What pressing Show on a tab does. It does not bump the fetch generation —
+    that is how a fetch is told it has been overtaken, and asking for one more
+    report is not a reason to throw away an hour of the main one. It waits for
+    the main fetch instead, and if a newer fetch has started meanwhile it leaves
+    the work to it: the report is wanted now, so that fetch will bring it back.
+    """
+    if not (his['logged_in'] and store['from']):
+        return
+    generation = his['generation']
+    with fetch_lock:
+        if not his['logged_in'] or his['generation'] != generation:
+            return
+        missing = [name for name in names
+                   if store['linked_stamp'].get(name) != store['stamp']
+                   and name in wanted_reports]
+        if not missing or not store['rows']:
+            return
+        his['fetching'] = True
+        loading_reports.update(missing)
+        try:
+            joined, kept = join_linked_reports(
+                store['rows'], store['from'], store['to'], generation, missing)
+        finally:
+            loading_reports.difference_update(missing)
+            his['fetching'] = False
+            store['progress']['active'] = False
+    # Somebody may have pressed Show again while this was fetching, in which
+    # case they have said they do not want it after all.
+    for name in joined:
+        if name not in wanted_reports:
+            continue
+        store['linked'][name] = joined[name]
+        store['linked_rows'][name] = kept.get(name) or []
+        store['linked_stamp'][name] = store['stamp']
+
+
+def _show_linked_task(names):
+    """A tab's reports fetched on its own thread — nobody is held at the button."""
+    try:
+        load_linked_now(names)
+    except HISCancelled:
+        print('[*] Fetching a tab\'s report stopped — a newer fetch took over.')
+    except HISAuthError as e:
+        his['logged_in'] = False
+        his['client'].logout()
+        his['error'] = str(e)
+        his['last_error_at'] = datetime.now().isoformat()
+        print(f"[!] HIS session ended: {e}")
+    except Exception as e:
+        his['error'] = str(e)
+        his['last_error_at'] = datetime.now().isoformat()
+        print(f"[!] Fetching a tab's report failed: {e}")
 
 
 def fetch_and_report():
     """A fetch nobody is waiting on — the error goes to the status line."""
     try:
         count = his_fetch_once()
-        print(f"[*] HIS fetch: {count} rows at {his['last_fetch']}")
+        print(f"[*] HIS fetch: {count} rows in {his['last_duration']}s "
+              f"at {his['last_fetch']}")
+    except HISCancelled:
+        # Two different things end a fetch this way and they want telling apart:
+        # a newer fetch took over (nothing went wrong, and that fetch is already
+        # saying what is happening), or the session ended under it — which reads
+        # as "overtaken" but leaves nobody fetching at all.
+        if not his['logged_in']:
+            print('[*] HIS fetch stopped — the session ended under it. Sign in again.')
+        else:
+            print('[*] HIS fetch overtaken by a newer one — stopping it.')
     except HISAuthError as e:
         his['logged_in'] = False
         his['client'].logout()
@@ -511,6 +1473,10 @@ def _his_poll_task():
             interval = his['client'].config['poll_interval']
             if failures:
                 interval = min(interval * min(failures, 5), 1800)
+            # A year takes longer to fetch than the refresh interval, and a
+            # board that is always fetching is a board nobody else can query
+            # against. Wait at least as long as the last one took.
+            interval = max(interval, his['last_duration'])
             for _ in range(int(interval)):
                 if not his['logged_in']:
                     break
@@ -608,6 +1574,8 @@ def his_logout():
     store['rows'] = []
     store['fetched_at'] = None
     store['linked'] = {}
+    store['linked_rows'] = {}
+    store['linked_stamp'] = {}
     his['login_endpoint'] = None
     return jsonify({'ok': True})
 
@@ -618,6 +1586,8 @@ def his_fetch_now():
         return jsonify({'error': 'Not signed in to the HIS.'}), 401
     try:
         count = his_fetch_once()
+    except HISCancelled:
+        return jsonify({'ok': True, 'rows': len(store['rows']), 'overtaken': True})
     except HISAuthError as e:
         his['logged_in'] = False
         his['client'].logout()
@@ -628,12 +1598,66 @@ def his_fetch_now():
     return jsonify({'ok': True, 'rows': count})
 
 
+@app.route('/api/tabs/show', methods=['POST'])
+def api_tab_show():
+    """Ask for one tab's report, or stop asking for it.
+
+    Every tab past the overview is a report of its own and a pass of its own
+    over the span, so none of them is fetched until somebody presses Show. Once
+    pressed, the report stays wanted for the rest of the session: it is refetched
+    with every poll and every new range, so the tab does not empty under whoever
+    is reading it. Pressing again gives the span's fetches back.
+    """
+    data = request.get_json(silent=True) or {}
+    tab = str(data.get('tab') or '')
+    if tab not in TAB_REPORTS:
+        return jsonify({'error': f'{tab!r} is not a tab.'}), 400
+    known = his_client.list_reports()
+    names = [name for name in TAB_REPORTS[tab] if name in known]
+    missing = [name for name in TAB_REPORTS[tab] if name not in known]
+
+    if data.get('show') is False:
+        # Nothing else may be showing this report: the collection report fills
+        # in departments for the rejections tab alone, but a report two tabs
+        # share is only given up when both have let go of it.
+        others = {name for other, reports in TAB_REPORTS.items() if other != tab
+                  and tab_state(other) != 'idle' for name in reports}
+        for name in names:
+            if name not in others:
+                wanted_reports.discard(name)
+                store['linked'].pop(name, None)
+                store['linked_rows'].pop(name, None)
+                store['linked_stamp'].pop(name, None)
+        return jsonify({'ok': True, 'state': tab_state(tab)})
+
+    if not his['logged_in']:
+        return jsonify({'error': 'Not signed in to the HIS.'}), 401
+    if missing:
+        return jsonify({'error': f"No report definition called {missing[0]!r} in reports/."}), 404
+    wanted_reports.update(names)
+    background(_show_linked_task, names)
+    return jsonify({'ok': True, 'state': tab_state(tab), 'reports': names})
+
+
 @app.route('/api/his/config', methods=['POST'])
 def his_config():
     data = request.get_json(silent=True) or {}
     his['client'].update_config(data)
     save_his_config()
     return jsonify({'ok': True, 'config': his['client'].config})
+
+
+@app.route('/api/cache/clear', methods=['POST'])
+def his_cache_clear():
+    """Throw away every remembered chunk.
+
+    Here because the cache is the one thing the dashboard writes down that is
+    nobody else's business, so whoever sets the PC up needs a way to empty it
+    without going looking for the folder.
+    """
+    cache = his['client'].cache
+    dropped = cache.clear() if cache else 0
+    return jsonify({'ok': True, 'dropped': dropped, 'cache': cache_stats()})
 
 
 @app.route('/api/view', methods=['GET', 'POST'])
@@ -649,6 +1673,11 @@ def api_view():
             continue
         if key in ('days_back', 'days_ahead') and str(data[key]) != str(view[key]):
             moved = True
+        if key == 'tests' and isinstance(data[key], dict):
+            # One tab's test at a time, so choosing on the rejections tab does
+            # not clear what the TAT tabs are showing.
+            view['tests'].update(data[key])
+            continue
         view[key] = data[key]
     clean_view()
     save_view()
@@ -658,6 +1687,31 @@ def api_view():
     if moved and his['logged_in']:
         background(fetch_and_report)
     return jsonify({'ok': True, 'view': dict(view), 'refetching': moved})
+
+
+@app.route('/api/targets', methods=['GET', 'POST'])
+def api_targets():
+    """The minutes each test is expected to take, typed in on the TAT tabs.
+
+    A POST carries only the tests the viewer edited; a test sent with a blank or
+    a zero is forgotten rather than stored, which is how a test goes back to the
+    default time.
+    """
+    if request.method == 'GET':
+        return jsonify({'targets': dict(targets), 'default_target': DEFAULT_TARGET})
+
+    data = (request.get_json(silent=True) or {}).get('targets') or {}
+    for name, minutes in data.items():
+        key = match_key(name)
+        if not key:
+            continue
+        cleaned = clean_targets({name: minutes})
+        if cleaned:
+            targets.update(cleaned)
+        else:
+            targets.pop(key, None)
+    save_targets()
+    return jsonify({'ok': True, 'targets': dict(targets)})
 
 
 @app.route('/api/dashboard')
@@ -806,6 +1860,7 @@ if __name__ == '__main__':
 
     load_his_config()
     load_view()
+    load_targets()
 
     if windowed:
         background(_open_window_task, url)

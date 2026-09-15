@@ -5,6 +5,8 @@ build/
 dist/
 *.spec
 
-# Settings, the window's browser profile and anything else this PC has learned.
-# Nothing here belongs to anyone but the machine it is on.
+# Settings, the window's browser profile, the cached report chunks, and
+# anything else this PC has learned. Nothing here belongs to anyone but the
+# machine it is on — and data/cache holds patient data, so it especially does
+# not belong in the repository.
 data/

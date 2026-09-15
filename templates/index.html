@@ -129,6 +129,40 @@ button.primary:hover:not(:disabled) { filter: brightness(1.06); background: var(
 .segmented button[aria-pressed="true"] { background: var(--series); color: #fff; font-weight: 600; }
 .filters label { font-size: 12px; color: var(--muted); }
 
+/* ── tabs: one board per KPI, all over the same fetched rows ── */
+.tabs {
+  display: flex; gap: 2px; overflow-x: auto;
+  padding: 0 14px; background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.tabs button {
+  border: 0; border-radius: 0; background: transparent;
+  color: var(--ink-2); font-size: 13px; white-space: nowrap;
+  padding: 10px 12px; border-bottom: 2px solid transparent;
+}
+.tabs button[aria-selected="true"] {
+  color: var(--ink); font-weight: 600; border-bottom-color: var(--series);
+}
+
+/* ── the progress strip ──────────────────────────────────
+   A year is fetched a week at a time and takes minutes, so the board says how
+   far along it is. Text first — the bar underneath is the same news in a
+   second form, never the only form. */
+.progress {
+  padding: 8px 20px; border-bottom: 1px solid var(--border);
+  background: var(--surface); font-size: 12px; color: var(--ink-2);
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
+.progress .track {
+  flex: 1 1 160px; min-width: 120px; height: 6px; border-radius: 3px;
+  background: var(--border); overflow: hidden;
+}
+.progress .fill {
+  display: block; height: 100%; background: var(--series);
+  transition: width .3s ease;
+}
+.progress .note { color: var(--muted); }
+
 /* ── layout ──────────────────────────────────────────── */
 main { padding: 16px 20px 40px; }
 .tiles {
@@ -174,6 +208,9 @@ th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--gri
 th { color: var(--muted); font-weight: 600; }
 td.num { text-align: right; font-variant-numeric: tabular-nums; }
 td.wrap { white-space: normal; min-width: 240px; }
+input.target { width: 90px; padding: 3px 6px; font-size: 12.5px; text-align: right; }
+.card .actions { margin-top: 12px; display: flex; align-items: center; gap: 10px; }
+.card .actions .said { font-size: 12px; color: var(--muted); }
 
 /* ── tooltip ─────────────────────────────────────────── */
 #tip {
@@ -204,6 +241,7 @@ td.wrap { white-space: normal; min-width: 240px; }
 .panel p.hint { margin: 0 0 18px; font-size: 13px; color: var(--muted); }
 .field { margin-bottom: 12px; }
 .field label { display: block; font-size: 12px; color: var(--ink-2); margin-bottom: 4px; }
+.field p.hint { margin: 4px 0 0; font-size: 11px; line-height: 1.45; color: var(--muted); }
 .field input, .field select { width: 100%; }
 .error {
   border-left: 3px solid var(--critical);
@@ -228,6 +266,14 @@ details.advanced summary { font-size: 12px; color: var(--muted); cursor: pointer
   <button id="refresh" type="button">Refresh</button>
 </header>
 
+<nav class="tabs" id="tabs" role="tablist" aria-label="Boards">
+  <button type="button" role="tab" data-tab="overview" aria-selected="true">Overview</button>
+  <button type="button" role="tab" data-tab="rejections" aria-selected="false">Rejections</button>
+  <button type="button" role="tab" data-tab="critical" aria-selected="false">Critical results</button>
+  <button type="button" role="tab" data-tab="referred_tat" aria-selected="false">Referred TAT</button>
+  <button type="button" role="tab" data-tab="inhouse_tat" aria-selected="false">In-house TAT</button>
+</nav>
+
 <div class="filters">
   <label for="rangeSeg">Range</label>
   <div class="segmented" id="rangeSeg" role="group" aria-label="Date range">
@@ -237,12 +283,25 @@ details.advanced summary { font-size: 12px; color: var(--muted); cursor: pointer
     <button type="button" data-days="89">90 days</button>
     <button type="button" data-days="364">1 year</button>
   </div>
-  <label for="siteSel">Site</label>
-  <select id="siteSel"><option value="">All sites</option></select>
   <label for="deptSel">Department</label>
   <select id="deptSel"><option value="">All departments</option></select>
+  <!-- One test at a time, remembered per tab: each tab is a different report
+       and they do not spell a test the same way. -->
+  <label for="testSel" id="testLabel">Test</label>
+  <select id="testSel"><option value="">All tests</option></select>
   <span class="spacer"></span>
+  <!-- Each KPI tab is a report of its own and a pass of its own over the range,
+       so none of them is fetched until this is pressed. -->
+  <button id="tabLoad" type="button" hidden>Show</button>
   <button id="tableToggle" type="button" aria-pressed="false">Table view</button>
+</div>
+
+<!-- How far through a wide span the fetch is. Hidden when there is nothing to
+     say, which is most of the time — a day arrives before anyone reads this. -->
+<div class="progress" id="progress" role="status" aria-live="polite" hidden>
+  <span id="progressText"></span>
+  <span class="track"><span class="fill" id="progressFill" style="width:0%"></span></span>
+  <span class="note" id="progressNote"></span>
 </div>
 
 <main>
@@ -295,6 +354,42 @@ details.advanced summary { font-size: 12px; color: var(--muted); cursor: pointer
         <label for="browserPath">Browser for signing in (blank = the one on this PC)</label>
         <input id="browserPath">
       </div>
+      <!-- Waiting for the HIS. A day of the main report takes about two
+           minutes and a month about ten, so a wide span is fetched in pieces
+           and the pieces are remembered. These are the two knobs for that. -->
+      <div class="field">
+        <label for="chunkDays">Fetch in chunks of (days — 0 asks for the whole span at once)</label>
+        <input id="chunkDays" type="number" min="0" max="366" step="1">
+      </div>
+      <div class="field">
+        <label for="chunkWorkers">Chunks at once (higher is faster here and slower for everyone else on the HIS)</label>
+        <input id="chunkWorkers" type="number" min="1" max="8" step="1">
+      </div>
+      <div class="field">
+        <label for="reportTimeout">Wait for the HIS (seconds per chunk)</label>
+        <input id="reportTimeout" type="number" min="30" step="30">
+      </div>
+      <div class="field">
+        <label for="testFilterMax">Ask one test at a time up to (distinct tests)</label>
+        <input id="testFilterMax" type="number" min="0" max="5000" step="50">
+        <p class="hint">The two TAT reports will not answer a whole day across
+          every service, so they are asked one service at a time — the test names
+          the samples received report brought back over the same range. A range
+          holding more distinct tests than this is asked the ordinary way
+          instead, and the tab says which way it went. 0 never asks one at a
+          time.</p>
+      </div>
+      <div class="field">
+        <label><input type="checkbox" id="cacheEnabled" style="width:auto"> Remember fetched chunks on this PC</label>
+        <p class="hint" id="cacheNote">Makes a repeated wide range quick. It writes report rows —
+          patient data — under data/cache on this PC; nothing else the dashboard
+          does touches the disk. The last few days are never kept.</p>
+      </div>
+      <div class="field">
+        <label for="cacheDays">Keep a remembered chunk for (days)</label>
+        <input id="cacheDays" type="number" min="0" max="3650" step="1">
+      </div>
+      <button type="button" id="clearCache">Clear remembered chunks</button>
       <div class="field">
         <label><input type="checkbox" id="verifySsl" style="width:auto"> Verify the HIS certificate</label>
       </div>
@@ -314,7 +409,8 @@ details.advanced summary { font-size: 12px; color: var(--muted); cursor: pointer
 /* ───────────────────────────────────────────────────────────
    State
    ─────────────────────────────────────────────────────────── */
-let state = { dashboard: null, his: null, tableView: false };
+let state = { dashboard: null, his: null, tableView: false, tab: 'overview',
+              targetsSaved: 0 };
 
 const $  = (id) => document.getElementById(id);
 const el = (tag, attrs = {}, kids = []) => {
@@ -641,9 +737,36 @@ window.addEventListener('resize', () => {
   resizeTimer = setTimeout(drawCharts, 150);
 });
 
+/* Which tab is showing decides the tiles and the charts. Everything else on
+   the page — the range, the department, the progress strip — is the same on all
+   five, and is drawn by renderChrome below. */
 function render() {
   const data = state.dashboard;
   if (!data) return;
+  // The board redraws itself every few seconds. Somebody typing an expected
+  // time into the TAT table would have it taken out from under them mid-number,
+  // so a redraw waits until they have finished with the box.
+  if (document.activeElement && document.activeElement.classList.contains('target')) return;
+  pending.length = 0;
+  $('tiles').replaceChildren();
+  $('charts').replaceChildren();
+
+  const tabs = data.tabs || {};
+  const t = tabs[state.tab];
+  if (state.tab === 'overview') renderOverview(data);
+  // A tab nobody has asked for holds no rows, and a board of zeros reads as a
+  // quiet lab rather than as a report that was never fetched. So it says which
+  // it is, and what pressing Show will cost.
+  else if (t && t.state !== 'ready') renderTabGate(t);
+  else if (state.tab === 'rejections') renderRejections(tabs.rejections);
+  else if (state.tab === 'critical') renderCritical(tabs.critical);
+  else renderTat(tabs[state.tab]);
+
+  drawCharts();
+  renderChrome(data);
+}
+
+function renderOverview(data) {
   const k = data.kpis;
 
   // ── tiles ──
@@ -662,9 +785,6 @@ function render() {
 
   // ── charts ──
   const charts = $('charts');
-  charts.replaceChildren();
-  pending.length = 0;
-
   const days = k.per_day;
   charts.appendChild(card('Samples received per day',
     `${data.range.from || ''} to ${data.range.to || ''}`,
@@ -729,18 +849,374 @@ function render() {
   }
 
   if (state.tableView) charts.appendChild(tableView(k));
+}
 
-  drawCharts();
+/* The tests the tab showing can offer, and the one it is on. Each tab keeps its
+   own pick, because the reports behind them name tests differently. */
+function tabTests(data) {
+  if (state.tab === 'overview') return { list: data.kpis.tests || [], chosen: data.kpis.test || '' };
+  const t = (data.tabs || {})[state.tab] || {};
+  return { list: t.tests || [], chosen: t.test || '' };
+}
 
-  // ── filter choices, without losing what is selected ──
-  fillSelect($('siteSel'), data.choices.sites, data.view.site, 'All sites');
+/* Everything outside the tiles and charts: the same on whichever tab. */
+function renderChrome(data) {
+  for (const btn of $('tabs').children)
+    btn.setAttribute('aria-selected', String(btn.dataset.tab === state.tab));
+
   fillSelect($('deptSel'), data.choices.departments, data.view.department, 'All departments');
+  const tests = tabTests(data);
+  fillSelect($('testSel'), tests.list, tests.chosen, 'All tests');
+  // A tab whose report brought back no test names has nothing to pick from,
+  // and an empty dropdown reads as a fault rather than as an absence.
+  const noTests = tests.list.length === 0;
+  $('testSel').hidden = noTests;
+  $('testLabel').hidden = noTests;
+  $('tableToggle').hidden = state.tab !== 'overview';
+
+  // Show / Fetching… / Stop showing, for the tab being looked at.
+  const tab = (data.tabs || {})[state.tab];
+  const load = $('tabLoad');
+  load.hidden = state.tab === 'overview' || !tab;
+  if (!load.hidden) {
+    load.disabled = tab.state === 'loading';
+    load.textContent = tab.state === 'ready' ? 'Stop showing'
+                     : tab.state === 'loading' ? 'Fetching…' : 'Show';
+    load.setAttribute('title', tab.state === 'ready'
+      ? 'Stop fetching ' + tab.title + ' with every refresh'
+      : 'Fetch ' + tab.title + ' over this range');
+  }
+
   for (const btn of $('rangeSeg').children)
     btn.setAttribute('aria-pressed', String(Number(btn.dataset.days) === data.view.days_back));
 
   $('stamp').textContent = data.fetched_at
     ? 'Updated ' + new Date(data.fetched_at).toLocaleTimeString()
     : '';
+
+  renderProgress(data.progress || {});
+}
+
+/* ───────────────────────────────────────────────────────────
+   The four KPI tabs
+   Each is one linked report, read whole rather than narrowed to
+   the samples the overview is showing — a rejected sample is
+   often never received, so an intersection would drop the very
+   rows these tabs count. Each row is labelled with the
+   department of its sample instead, from the main report and
+   then from the collection report, and what could not be
+   labelled is said under the tiles.
+   ─────────────────────────────────────────────────────────── */
+const pct = (v) => (v === null || v === undefined) ? '—' : v.toFixed(1) + '%';
+
+/** What the sample-number lookup could and could not place.
+ *
+ *  A tab's rows are labelled with the department of their sample — from the
+ *  main report first, then from the collection report, which is where a sample
+ *  rejected before it was ever accepted still appears. Rows nothing could place
+ *  are said out loud rather than quietly kept or quietly dropped. */
+function matchNote(t) {
+  const m = t.match;
+  if (!m || (!m.unmatched && !m.dropped && !m.from_collection)) return null;
+  const parts = [];
+  const total = m.matched + m.unmatched;
+  parts.push(`Department known for ${fmt(m.matched)} of ${fmt(total)} rows`
+             + (m.from_collection
+                ? ` · ${fmt(m.from_collection)} sample${m.from_collection === 1 ? '' : 's'} filled in from the collection report`
+                : ''));
+  if (m.dropped)
+    parts.push(`${fmt(m.dropped)} row${m.dropped === 1 ? '' : 's'} left out: no report mentions their sample, so nothing can say which department it belongs to`);
+  else if (m.unmatched)
+    parts.push(`${fmt(m.unmatched)} row${m.unmatched === 1 ? ' belongs' : 's belong'} to a sample neither report mentions — still counted here, but a department filter will leave ${m.unmatched === 1 ? 'it' : 'them'} out`);
+  if (m.unmatched && !m.collection_column)
+    parts.push(m.collection_rows
+      ? 'The collection report brought back no department column, so nothing could be filled in from it'
+      : 'The collection report brought back nothing for this range');
+  return noteCard(parts.join(' · ') + '.');
+}
+
+/** A tab nobody has asked for yet, or one still being fetched.
+ *
+ *  The overview is one report. Every other tab is another one, and another pass
+ *  over the same range — six reports is six times the wait, and a year is an
+ *  afternoon. So nothing here is fetched until somebody asks for it, and the
+ *  tab says that plainly rather than drawing a board of zeros. */
+function renderTabGate(t) {
+  $('tiles').replaceChildren();
+  const node = el('div', { class: 'card wide' });
+  node.appendChild(el('h2', { text: t.title }));
+
+  if (t.state === 'loading') {
+    node.appendChild(el('p', { class: 'sub',
+      text: `Fetching ${t.title} over this range. It is its own pass over the range — about as long as the samples received took — and the numbers appear here as they land. The line above says where it has got to.` }));
+  } else {
+    node.appendChild(el('p', { class: 'sub',
+      text: `Not fetched. This tab is ${t.title}, a report of its own: asking for it is another pass over the whole range, so it waits until you ask. It is then kept up to date with every refresh until you press Stop showing.` }));
+    const btn = el('button', { type: 'button', text: 'Show ' + t.title });
+    btn.addEventListener('click', () => showTab(state.tab, true));
+    const actions = el('div', { class: 'actions' });
+    actions.appendChild(btn);
+    node.appendChild(actions);
+  }
+  $('charts').appendChild(node);
+}
+
+/** Ask for a tab's report, or give it back. */
+async function showTab(tab, show) {
+  try {
+    await api('/api/tabs/show', { tab, show });
+  } catch (e) {
+    alert(e.message);
+  }
+  await pull();
+}
+
+/** What asking one test at a time cost, and what it could not get.
+ *
+ *  Two of these reports will not answer a whole day across every service, so
+ *  they are asked one service at a time — the test names the samples received
+ *  brought back over the same span. A service that report has never heard of
+ *  answers nothing, which is worth saying: it is a name missing from the board,
+ *  not a quiet day. */
+function fetchNote(t) {
+  const f = t.fetch || {};
+  const parts = [];
+  if (f.tests_asked)
+    parts.push(`Asked one test at a time — ${fmt(f.tests_asked)} test names from the samples received`
+               + (f.empty ? `, ${fmt(f.empty)} of which this report had nothing for` : ''));
+  else if (f.tests_skipped === 'too many tests')
+    parts.push(`Asked across every test: this range holds ${fmt(f.tests_available)} of them, more than one request each is worth`);
+  if (f.failed)
+    parts.push(`${fmt(f.failed)} of ${fmt(f.passes)} requests did not come back${f.failed_error ? ' (' + f.failed_error + ')' : ''} — those tests are missing from the numbers below`);
+  return parts.length ? noteCard(parts.join(' · ') + '.') : null;
+}
+
+function noteCard(message) {
+  const node = el('div', { class: 'card wide' });
+  node.appendChild(el('p', { class: 'sub', style: 'margin:0', text: message }));
+  return node;
+}
+
+/** A card holding nothing but a table. */
+function tableCard(title, sub, headings, rows) {
+  const node = el('div', { class: 'card wide' });
+  node.appendChild(el('h2', { text: title }));
+  if (sub) node.appendChild(el('p', { class: 'sub', text: sub }));
+  const wrap = el('div', { class: 'table-wrap' });
+  const table = el('table');
+  const head = el('tr');
+  for (const h of headings) head.appendChild(el('th', { text: h }));
+  table.appendChild(el('thead', {}, [head]));
+  const body = el('tbody');
+  for (const cells of rows) {
+    const tr = el('tr');
+    for (const cell of cells) tr.appendChild(cell);
+    body.appendChild(tr);
+  }
+  table.appendChild(body);
+  wrap.appendChild(table);
+  node.appendChild(wrap);
+  return node;
+}
+
+const cell = (value, cls) => el('td', { class: cls || null, text: value });
+
+function renderRejections(t) {
+  if (!t) return;
+  const charts = $('charts');
+  const n = t.totals;
+  $('tiles').replaceChildren(
+    tile('Samples rejected', fmt(n.rejected), '',
+         `of ${fmt(n.received)} samples received in this range`),
+    tile('Rejection rate', n.rate === null ? '—' : n.rate.toFixed(2) + '%', '',
+         n.rate === null
+           ? 'Only shown across every test — the rejection report names services the main report does not.'
+           : 'Rejected samples ÷ samples received — a sample rejected before it was accepted is not in the second figure'),
+    tile('Tests turned away', fmt(n.lines), '',
+         'A sample rejected for four tests is counted four times here'),
+  );
+  if (t.error) charts.appendChild(noteCard('The rejection report did not answer: ' + t.error));
+  const fnote = fetchNote(t);
+  if (fnote) charts.appendChild(fnote);
+  const note = matchNote(t);
+  if (note) charts.appendChild(note);
+  charts.appendChild(card('Why samples were rejected',
+    'Every reason the lab recorded, biggest first.',
+    (width) => hbar(t.by_reason, { width, labelWidth: 260, unit: 'rejections',
+                                   label: 'Rejections by reason' }), true));
+}
+
+function renderCritical(t) {
+  if (!t) return;
+  const charts = $('charts');
+  const n = t.totals;
+  const share = (count) => n.measured ? ` · ${(100 * count / n.measured).toFixed(1)}% of those timed` : '';
+  $('tiles').replaceChildren(
+    tile('Critical results', fmt(n.results), '',
+         n.untimed ? `${fmt(n.untimed)} could not be timed — a stamp was missing` : 'All of them timed'),
+    tile('Average to authorise', duration(n.mean), '', `machine result to second authorisation`),
+    tile('Median to authorise', duration(n.median), '', `of ${fmt(n.measured)} results`),
+    tile('Over 15 minutes', fmt(n.over_15), '', 'late' + share(n.over_15)),
+    tile('Over 30 minutes', fmt(n.over_30), '', 'late' + share(n.over_30)),
+  );
+  if (t.error) charts.appendChild(noteCard('The critical results report did not answer: ' + t.error));
+  const cfnote = fetchNote(t);
+  if (cfnote) charts.appendChild(cfnote);
+  const cnote = matchNote(t);
+  if (cnote) charts.appendChild(cnote);
+  charts.appendChild(card('How long the authorisation took',
+    'Machine result to second authorisation. Darker is longer.',
+    (width) => hbar(t.buckets, { width, ramp: true, labelWidth: 120, unit: 'results',
+                                 label: 'Time to second authorisation' })));
+  charts.appendChild(tableCard('By test',
+    'Which tests wait longest between the machine and a name.',
+    ['Test', 'Results', 'Average', 'Median', 'Over 15 min', 'Over 30 min'],
+    t.by_test.map((r) => [
+      el('td', { class: 'wrap', text: clip(r.label, 60) }),
+      cell(fmt(r.value), 'num'),
+      cell(duration(r.mean), 'num'),
+      cell(duration(r.median), 'num'),
+      cell(fmt(r.over_15), 'num'),
+      cell(fmt(r.over_30), 'num'),
+    ])));
+}
+
+function renderTat(t) {
+  if (!t) return;
+  const charts = $('charts');
+  const n = t.totals;
+  $('tiles').replaceChildren(
+    tile('Tests measured', fmt(n.measured), '',
+         `${fmt(n.tests)} distinct test${n.tests === 1 ? '' : 's'}`),
+    tile('Average', duration(n.mean), '', t.clock),
+    tile('Median', duration(n.median), '', t.clock),
+    tile('Met expected time', pct(n.met_pct), '',
+         `${fmt(n.met)} of ${fmt(n.measured)} within the time set for their test`),
+  );
+  if (t.error) charts.appendChild(noteCard('This tab\u2019s report did not answer: ' + t.error));
+  const tfnote = fetchNote(t);
+  if (tfnote) charts.appendChild(tfnote);
+  const tnote = matchNote(t);
+  if (tnote) charts.appendChild(tnote);
+
+  // What was left out, and why. A turnaround figure that quietly drops a third
+  // of its rows is worse than one that says it did.
+  const aside = [];
+  if (n.other_kind) aside.push(`${fmt(n.other_kind)} belong to the other tab`);
+  if (n.unclassified) aside.push(`${fmt(n.unclassified)} could not be told apart — a department was blank`);
+  if (n.untimed) aside.push(`${fmt(n.untimed)} had no usable time on them`);
+  if (aside.length) charts.appendChild(noteCard('Set aside: ' + aside.join(' · ') + '.'));
+
+  charts.appendChild(card('How long the tests took', t.clock + ' Darker is longer.',
+    (width) => hbar(t.buckets, { width, ramp: true, labelWidth: 120, unit: 'tests',
+                                 label: 'Turnaround' })));
+  charts.appendChild(targetsTable(t));
+}
+
+/** By test, with the expected time editable in place.
+ *
+ *  One list of times, shared by both TAT tabs and kept on this PC. A test left
+ *  blank falls back to the default rather than being held to no minutes at all. */
+function targetsTable(t) {
+  const fallback = (state.dashboard.default_target || 60);
+  const node = el('div', { class: 'card wide' });
+  node.appendChild(el('h2', { text: 'By test, against its expected time' }));
+  node.appendChild(el('p', { class: 'sub', text:
+    `Type the minutes a test is expected to take and save. Blank puts it back to the default of ${fallback} minutes. The times are shared by both TAT tabs.` }));
+
+  const wrap = el('div', { class: 'table-wrap' });
+  const table = el('table');
+  const head = el('tr');
+  for (const h of ['Test', 'Tests', 'Average', 'Median', 'Expected (min)', 'Met'])
+    head.appendChild(el('th', { text: h }));
+  table.appendChild(el('thead', {}, [head]));
+  const body = el('tbody');
+  const inputs = [];
+  for (const r of t.by_test) {
+    const tr = el('tr');
+    tr.appendChild(el('td', { class: 'wrap', text: clip(r.label, 60) }));
+    tr.appendChild(cell(fmt(r.value), 'num'));
+    tr.appendChild(cell(duration(r.mean), 'num'));
+    tr.appendChild(cell(duration(r.median), 'num'));
+    const box = el('input', { class: 'target', type: 'number', min: '1', step: '1',
+                              value: r.target, 'aria-label': `Expected minutes for ${r.label}` });
+    inputs.push([r.label, box]);
+    const td = el('td', { class: 'num' });
+    td.appendChild(box);
+    tr.appendChild(td);
+    tr.appendChild(cell(`${fmt(r.met)} · ${pct(r.met_pct)}`, 'num'));
+    body.appendChild(tr);
+  }
+  table.appendChild(body);
+  wrap.appendChild(table);
+  node.appendChild(wrap);
+
+  if (!t.by_test.length) {
+    node.appendChild(emptyNote('No tests to measure in this range.'));
+    return node;
+  }
+
+  // Saving redraws the whole card, so the confirmation has to outlive the node
+  // that showed it or nothing would ever appear to happen.
+  const fresh = state.targetsSaved && (Date.now() - state.targetsSaved) < 5000;
+  const said = el('span', { class: 'said', text: fresh ? 'Saved.' : '' });
+  const save = el('button', { class: 'primary', type: 'button', text: 'Save expected times' });
+  // A box still focused would hold off the redraw that shows the new figures.
+  const box_blur = () => { for (const [, box] of inputs) box.blur(); };
+
+  save.addEventListener('click', async () => {
+    save.disabled = true;
+    said.textContent = 'Saving…';
+    const payload = {};
+    for (const [name, box] of inputs) payload[name] = box.value;
+    try {
+      await api('/api/targets', { targets: payload });
+      state.targetsSaved = Date.now();
+      said.textContent = 'Saved.';
+      box_blur();
+      await pull();
+    } catch (e) {
+      said.textContent = e.message;
+    } finally {
+      save.disabled = false;
+    }
+  });
+  const actions = el('div', { class: 'actions' });
+  actions.appendChild(save);
+  actions.appendChild(said);
+  node.appendChild(actions);
+  return node;
+}
+
+/** How far through a wide span the fetch has got.
+ *
+ *  A year is 53 weekly chunks and minutes of waiting, so an empty board with no
+ *  explanation reads as broken. This says which chunk it is on, how many came
+ *  off this PC rather than the HIS, and — while the numbers below are only part
+ *  of the span — that they are not the whole answer yet. */
+function renderProgress(p) {
+  const strip = $('progress');
+  if (!p.active && !p.partial) { strip.hidden = true; return; }
+  strip.hidden = false;
+
+  const total = p.total || 0;
+  const done = p.done || 0;
+  const pct = total ? Math.round((done / total) * 100) : 0;
+  $('progressFill').style.width = pct + '%';
+
+  if (p.active) {
+    $('progressText').textContent = total > 1
+      ? `${p.phase || 'Fetching'} — chunk ${done} of ${total} (${pct}%)`
+      : (p.phase || 'Fetching') + '…';
+  } else {
+    $('progressText').textContent =
+      `Stopped after ${done} of ${total} chunks — the numbers below are part of the range, not all of it.`;
+  }
+
+  const notes = [];
+  if (p.rows) notes.push(`${fmt(p.rows)} rows so far`);
+  if (p.cached) notes.push(`${p.cached} chunk${p.cached === 1 ? '' : 's'} off this PC`);
+  $('progressNote').textContent = notes.join(' · ');
 }
 
 /** Every chart's numbers, readable without seeing colour at all. */
@@ -815,12 +1291,39 @@ function renderHis() {
   setIfIdle('loginSite', c.login_site);
   setIfIdle('pollInterval', c.poll_interval);
   setIfIdle('browserPath', c.browser_path);
+  setIfIdle('chunkDays', c.chunk_days);
+  setIfIdle('chunkWorkers', c.chunk_workers);
+  setIfIdle('reportTimeout', c.timeout);
+  setIfIdle('testFilterMax', c.test_filter_max);
+  setIfIdle('cacheDays', c.cache_days);
   if (document.activeElement !== $('verifySsl')) $('verifySsl').checked = c.verify_ssl !== false;
+  if (document.activeElement !== $('cacheEnabled')) $('cacheEnabled').checked = c.cache_enabled !== false;
+
+  const cache = s.cache || {};
+  $('clearCache').textContent = cache.chunks
+    ? `Clear remembered chunks (${cache.chunks}, ${mb(cache.bytes)})`
+    : 'Clear remembered chunks (nothing kept)';
+  $('clearCache').disabled = !cache.chunks;
+}
+
+/** Bytes as the megabytes somebody would say out loud. */
+function mb(bytes) {
+  const value = (bytes || 0) / (1024 * 1024);
+  return value < 0.1 ? '<0.1 MB' : value.toFixed(1) + ' MB';
 }
 
 function setIfIdle(id, value) {
   const node = $(id);
   if (node && document.activeElement !== node && value !== undefined && node.value === '') node.value = value ?? '';
+}
+
+/** A number box read back for the server: blank means "leave it alone", and 0
+ *  is a real answer (chunking off), so it cannot go through `|| undefined`. */
+function num(id) {
+  const raw = $(id).value.trim();
+  if (raw === '') return undefined;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : undefined;
 }
 
 function showError(message) {
@@ -906,12 +1409,30 @@ $('rangeSeg').addEventListener('click', async (evt) => {
   await pull();
 });
 
-for (const [id, key] of [['siteSel', 'site'], ['deptSel', 'department']]) {
-  $(id).addEventListener('change', async () => {
-    await api('/api/view', { [key]: $(id).value });
-    await pull();
-  });
-}
+$('deptSel').addEventListener('change', async () => {
+  await api('/api/view', { department: $('deptSel').value });
+  await pull();
+});
+
+// The test is remembered per tab, so moving between tabs does not carry one
+// report's spelling of a test onto another's list.
+$('testSel').addEventListener('change', async () => {
+  await api('/api/view', { tests: { [state.tab]: $('testSel').value } });
+  await pull();
+});
+
+$('tabs').addEventListener('click', (evt) => {
+  const btn = evt.target.closest('button');
+  if (!btn || btn.dataset.tab === state.tab) return;
+  state.tab = btn.dataset.tab;
+  render();
+});
+
+$('tabLoad').addEventListener('click', () => {
+  const t = ((state.dashboard || {}).tabs || {})[state.tab];
+  if (!t || t.state === 'loading') return;
+  showTab(state.tab, t.state !== 'ready');
+});
 
 $('tableToggle').addEventListener('click', () => {
   state.tableView = !state.tableView;
@@ -940,12 +1461,29 @@ $('saveSettings').addEventListener('click', async () => {
       base_url: $('baseUrl').value,
       auth_url: $('authUrl').value,
       login_site: $('loginSite').value,
-      poll_interval: Number($('pollInterval').value) || undefined,
+      poll_interval: num('pollInterval'),
       browser_path: $('browserPath').value,
       verify_ssl: $('verifySsl').checked,
+      chunk_days: num('chunkDays'),
+      chunk_workers: num('chunkWorkers'),
+      timeout: num('reportTimeout'),
+      test_filter_max: num('testFilterMax'),
+      cache_enabled: $('cacheEnabled').checked,
+      cache_days: num('cacheDays'),
     });
     showError('');
     alert('Settings saved.');
+  } catch (e) { showError(e.message); }
+});
+
+$('clearCache').addEventListener('click', async () => {
+  if (!confirm('Forget every chunk kept on this PC? The next wide range is fetched from the HIS again, which takes a while.'))
+    return;
+  try {
+    const out = await api('/api/cache/clear', {});
+    showError('');
+    alert(`Cleared ${out.dropped} remembered chunk${out.dropped === 1 ? '' : 's'}.`);
+    await pull();
   } catch (e) { showError(e.message); }
 });
 

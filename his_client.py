@@ -29,17 +29,22 @@ single file.
 """
 
 import base64
+import concurrent.futures
+import hashlib
 import json
 import os
 import re
+import socket
 import ssl
 import sys
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import browser_login
+from cache import ReportCache
 
 # ─────────────────────────────────────────────────────────────
 # DEFAULTS  (everything here is overridable from data/his_config.json)
@@ -86,6 +91,49 @@ DEFAULT_CONFIG = {
     'poll_interval': 300,
     'verify_ssl': True,
     'timeout': 240,
+
+    # ── Chunking ─────────────────────────────────────────────
+    # How slow is slow: on the live HIS a single day of the sample-received
+    # report takes about two minutes and a month takes ten, so a year asked for
+    # in one request never comes back — it times out, and the board looks broken
+    # rather than busy.
+    #
+    # So a wide span is not one request. It is cut into chunks of this many days
+    # and the chunks are asked for separately, which keeps every individual
+    # request inside a length the HIS will actually answer. Seven days is the
+    # size that fetches comfortably; 0 turns chunking off and asks for the whole
+    # span in one request, the way this dashboard used to.
+    'chunk_days': 7,
+    # A chunk that times out anyway is halved and tried again, down to this many
+    # days. Below this the report is simply too slow and the error is real.
+    'chunk_min_days': 1,
+    # Chunks in flight at once. The HIS spends those two minutes working, not
+    # talking, so asking for three chunks together is roughly three times the
+    # span in the same wall clock. Raising this is the fastest way to make a year
+    # bearable and also the fastest way to make the HIS unhappy for everybody
+    # else on it — 1 makes the fetch strictly sequential.
+    'chunk_workers': 3,
+    # Two of the reports will not answer a whole day across every service, so
+    # they are asked one test at a time — the test names the main report brought
+    # back over the same span (see `test_filter` in reports/*.json). A span wide
+    # enough to hold more distinct tests than this is asked for the ordinary way
+    # instead: past a few hundred, one request per test is slower than the one
+    # slow request it was meant to avoid, and the tab says which way it went.
+    'test_filter_max': 400,
+
+    # ── Disk cache ───────────────────────────────────────────
+    # Chunks that have already come back, kept under data/cache so the next year
+    # costs only the days since the last one. This is patient data on disk,
+    # which the rest of the dashboard avoids on purpose — see the README —
+    # so it can be turned off here and emptied from Advanced.
+    'cache_enabled': True,
+    # How long a settled chunk is trusted before it is asked for again.
+    'cache_days': 30,
+    # The last few days are never cached: a sample received today may not be
+    # accepted until Thursday, and that acceptance rewrites today's row.
+    'cache_settle_days': 2,
+    # Cache size ceiling. Past it, the chunks nobody has read for longest go.
+    'cache_max_mb': 512,
 }
 
 CONFIG_KEYS = set(DEFAULT_CONFIG)
@@ -97,6 +145,23 @@ class HISError(Exception):
 
 class HISAuthError(HISError):
     """Token missing / rejected / expired — the operator has to log in again."""
+
+
+class HISCancelled(HISError):
+    """The fetch was overtaken — the viewer moved, or signed out.
+
+    Its own class because it is not a failure: nothing is wrong, the answer is
+    simply no longer the one being asked for, and nobody needs telling.
+    """
+
+
+class HISTimeout(HISError):
+    """The report took longer than the HIS (or we) would wait.
+
+    Told apart from every other failure because it is the one worth answering
+    by asking for less: a chunk that times out is halved and tried again, which
+    is how a year-wide span gets fetched at all.
+    """
 
 
 # ─────────────────────────────────────────────────────────────
@@ -266,6 +331,74 @@ def response_message(payload):
     return ''
 
 
+def _as_date(value):
+    try:
+        return datetime.strptime(str(value)[:10], '%Y-%m-%d').date()
+    except (TypeError, ValueError):
+        raise HISError(f'{value!r} is not a date the report can use.')
+
+
+def _span_days(date_from, date_to):
+    """How many days a chunk covers, counting both ends."""
+    return (_as_date(date_to) - _as_date(date_from)).days + 1
+
+
+def plan_chunks(date_from, date_to, chunk_days=7):
+    """Cut a date span into chunks the HIS will actually answer.
+
+    Two things decide where the cuts go.
+
+    The chunks **share their boundary day** — [1st…8th], [8th…15th] rather than
+    [1st…7th], [8th…14th] — because nothing here knows whether the report counts
+    its TO_DATE as part of the range. Overlapping costs one repeated day per
+    chunk, which the dedupe throws away; a gap would silently lose one.
+
+    And the boundaries sit on a **fixed grid** of whole chunk_days since the
+    epoch, not on the span the viewer happened to ask for. That is what makes
+    the disk cache worth having: today's year and tomorrow's year differ by
+    their two end chunks, and every chunk in between is the same two dates on
+    both days and so comes off disk.
+    """
+    start = _as_date(date_from)
+    end = _as_date(date_to)
+    if end < start:
+        start, end = end, start
+    try:
+        chunk_days = int(chunk_days)
+    except (TypeError, ValueError):
+        chunk_days = 7
+    # 0 is "do not chunk"; a span already inside one chunk is one request.
+    if chunk_days <= 0 or (end - start).days <= chunk_days:
+        return [(start.strftime('%Y-%m-%d'), end.strftime('%Y-%m-%d'))]
+
+    points = [start]
+    grid = date.fromordinal((start.toordinal() // chunk_days + 1) * chunk_days)
+    while grid < end:
+        if grid > points[-1]:
+            points.append(grid)
+        grid += timedelta(days=chunk_days)
+    if end > points[-1]:
+        points.append(end)
+    return [(points[i].strftime('%Y-%m-%d'), points[i + 1].strftime('%Y-%m-%d'))
+            for i in range(len(points) - 1)]
+
+
+TIMEOUT_WORDS = ('timeout', 'timed out', 'time-out', 'timeexpired',
+                 'execution time', 'took too long', 'operation cancelled',
+                 'operation canceled', 'query processor ran out')
+
+
+def _mentions_timeout(value):
+    """True when a message is the HIS saying the query outran it.
+
+    The report server says so in several different voices — an ORA timeout, a
+    SQL "execution time" complaint, a gateway's own wording — and all of them
+    mean the same thing to us: ask for fewer days.
+    """
+    lowered = str(value or '').lower()
+    return any(word in lowered for word in TIMEOUT_WORDS)
+
+
 # ─────────────────────────────────────────────────────────────
 # Report definitions
 # ─────────────────────────────────────────────────────────────
@@ -321,6 +454,11 @@ def load_report(name):
 class HISClient:
     def __init__(self, config=None):
         self.config = dict(DEFAULT_CONFIG)
+        # One pool of permits for every report request, however the fetch is
+        # shaped — see _report_slot.
+        self._slots = None
+        self._slot_size = 0
+        self._slot_lock = threading.Lock()
         if config:
             self.update_config(config)
         self.token = ''
@@ -331,6 +469,11 @@ class HISClient:
         self._site = ''
         self._signin_payload = ''   # encrypted body the portal posted
         self._templates = {}
+        # Chunks are fetched on several threads at once, and an hour-old token
+        # expires for all of them at the same moment. Without this they would
+        # all start a browser login together.
+        self._token_lock = threading.RLock()
+        self.cache = None
 
     # ── config ────────────────────────────────────────────────
     # Blanking one of these would break every request, so an empty value is
@@ -345,7 +488,9 @@ class HISClient:
                 continue
             self.config[key] = value
         for key in ('poll_interval', 'days_back', 'days_ahead', 'timeout',
-                    'login_timeout', 'utc_offset_hours'):
+                    'login_timeout', 'utc_offset_hours', 'chunk_days',
+                    'chunk_min_days', 'chunk_workers', 'test_filter_max',
+                    'cache_days', 'cache_settle_days', 'cache_max_mb'):
             try:
                 self.config[key] = int(self.config[key])
             except (TypeError, ValueError):
@@ -355,6 +500,18 @@ class HISClient:
         self.config['days_ahead'] = max(0, self.config['days_ahead'])
         self.config['login_timeout'] = max(30, self.config['login_timeout'])
         self.config['timeout'] = max(30, self.config['timeout'])
+        # 0 is a real answer here — it means "do not chunk at all".
+        self.config['chunk_days'] = max(0, min(self.config['chunk_days'], 366))
+        self.config['chunk_min_days'] = max(1, min(self.config['chunk_min_days'], 366))
+        # More than a handful of chunks at once is a denial of service on a
+        # report server the whole hospital shares.
+        self.config['chunk_workers'] = max(1, min(self.config['chunk_workers'], 8))
+        # 0 is a real answer: never ask one test at a time.
+        self.config['test_filter_max'] = max(0, min(self.config['test_filter_max'], 5000))
+        self.config['cache_enabled'] = bool(self.config.get('cache_enabled', True))
+        self.config['cache_days'] = max(0, self.config['cache_days'])
+        self.config['cache_settle_days'] = max(0, self.config['cache_settle_days'])
+        self.config['cache_max_mb'] = max(0, self.config['cache_max_mb'])
         if not isinstance(self.config.get('known_sites'), list):
             self.config['known_sites'] = []
         # A blank site is not a choice — it is a settings file written before the
@@ -487,15 +644,30 @@ class HISClient:
                 pass
             if exc.code in (401, 403):
                 raise HISAuthError(f'HIS rejected the credentials (HTTP {exc.code}). {detail}'.strip())
+            # 408/504 are the report server saying the query outran it, and a
+            # 500 whose body says so is the same thing wearing a worse code.
+            # They are the codes a narrower date span can actually fix.
+            if exc.code in (408, 504, 522, 524) or _mentions_timeout(detail):
+                raise HISTimeout(f'The HIS timed out on {url} (HTTP {exc.code}). {detail}'.strip())
             raise HISError(f'HIS returned HTTP {exc.code} for {url}. {detail}'.strip())
         except urllib.error.URLError as exc:
             reason = getattr(exc, 'reason', exc)
+            if isinstance(reason, (socket.timeout, TimeoutError)) or _mentions_timeout(reason):
+                raise HISTimeout(
+                    f'The HIS did not answer {url} within '
+                    f"{timeout or self.config['timeout']}s."
+                )
             if isinstance(reason, ssl.SSLError) or 'CERTIFICATE' in str(reason).upper():
                 raise HISError(
                     f'TLS error talking to {url}: {reason}. '
                     'If the HIS uses an internal certificate, turn off "Verify certificate".'
                 )
             raise HISError(f'Cannot reach {url}: {reason}')
+        except (socket.timeout, TimeoutError):
+            raise HISTimeout(
+                f'The HIS did not answer {url} within '
+                f"{timeout or self.config['timeout']}s."
+            )
 
         if not raw.strip():
             return {}
@@ -645,7 +817,23 @@ class HISClient:
         """Renew the token from stored credentials when it is about to expire."""
         if self.is_token_valid():
             return
-        self._relogin()
+        self.renew_token()
+
+    def renew_token(self):
+        """Renew once, however many threads notice the expiry at the same time.
+
+        The second thread through the door finds the token the first one
+        fetched and goes back to work, rather than starting a second browser.
+        """
+        with self._token_lock:
+            if self.is_token_valid():
+                return
+            self._relogin()
+
+    def attach_cache(self, folder):
+        """Point the client at the folder where fetched chunks are remembered."""
+        self.cache = ReportCache(folder)
+        return self.cache
 
     # ── reports ───────────────────────────────────────────────
     def _template(self, name):
@@ -691,7 +879,9 @@ class HISClient:
         }
         # Anything else the caller wants pinned, by the report's own parameter
         # name. A value of None means "all of them", which these reports spell
-        # as a null storedValue with the text "All".
+        # as a null storedValue with the text "All". A {'value', 'text'} pair
+        # pins a dropdown the way the portal does: the id the report selects on
+        # and the name the operator picked, which some filters echo back.
         values.update(filters or {})
 
         for param in body.get('getReportFilters', []):
@@ -702,6 +892,9 @@ class HISClient:
             if value is None:
                 param['storedValue'] = None
                 param['storedValueText'] = 'All'
+            elif isinstance(value, dict):
+                param['storedValue'] = value.get('value')
+                param['storedValueText'] = str(value.get('text', value.get('value', '')))
             else:
                 param['storedValue'] = value
                 param['storedValueText'] = str(value)
@@ -711,15 +904,33 @@ class HISClient:
                                   or self._username or '')
         return body
 
+    def _report_slot(self):
+        """A permit to have one report request in flight.
+
+        Chunks are already asked for a few at a time, and a report that has to
+        be asked one test at a time (see `test_filter`) fans those passes out as
+        well. Nested, that would be "Chunks at once" squared — dozens of
+        requests at a report server the whole hospital shares. Every request
+        takes its permit from this one pool instead, so the setting stays the
+        true ceiling whatever shape the fetch takes.
+        """
+        wanted = max(1, int(self.config.get('chunk_workers', 3)))
+        with self._slot_lock:
+            if self._slots is None or self._slot_size != wanted:
+                self._slots = threading.BoundedSemaphore(wanted)
+                self._slot_size = wanted
+            return self._slots
+
     def fetch_report(self, name, date_from=None, date_to=None, filters=None):
         """Fetch one report and return its rows as dicts, column names untouched."""
         self.ensure_token()
         date_from, date_to = self.date_span(date_from, date_to)
 
         def post():
-            return self._request(self.config['report_path'],
-                                 self.build_body(name, date_from, date_to, filters),
-                                 auth=True)
+            with self._report_slot():
+                return self._request(self.config['report_path'],
+                                     self.build_body(name, date_from, date_to, filters),
+                                     auth=True)
 
         try:
             response = post()
@@ -727,13 +938,223 @@ class HISClient:
             # A token can expire between the check above and the call itself.
             if not self.has_credentials:
                 raise
-            self._relogin()
+            self.renew_token()
             response = post()
 
         records = extract_records(response)
         if records is None:
             message = response_message(response)
+            # A report that outran its own SQL answers 200 with a complaint in
+            # the body rather than a gateway error, so the words are all there
+            # is to go on — but it is still a timeout, and still worth halving
+            # the span over.
+            if _mentions_timeout(message) or _mentions_timeout(response):
+                raise HISTimeout(
+                    f'The {name} report timed out over {date_from}..{date_to}'
+                    + (f' — it said: {message}' if message else '') + '.'
+                )
             raise HISError(f'The {name} report returned no readable rows'
                            + (f' — it said: {message}' if message else
                               ' (the response format may have changed)') + '.')
         return [row for row in records if isinstance(row, dict)]
+
+    # ── chunking ──────────────────────────────────────────────
+    def report_fingerprint(self, name, filters=None):
+        """What makes two requests for the same dates different questions.
+
+        Hashed into the cache key, so editing a report definition — or pointing
+        the dashboard at a different HIS — retires the chunks fetched under the
+        old one instead of serving rows that were never asked for.
+        """
+        try:
+            template = json.dumps(self._templates.get(name) or load_report(name),
+                                  sort_keys=True, default=str)
+        except HISError:
+            template = name
+        return ReportCache.fingerprint({
+            'template': template,
+            'filters': filters or {},
+            'base_url': self.config.get('base_url', ''),
+            'report_path': self.config.get('report_path', ''),
+            'utc_offset_hours': self.config.get('utc_offset_hours', 3),
+        })
+
+    def fetch_report_chunked(self, name, date_from=None, date_to=None, filters=None,
+                             on_rows=None, on_progress=None, should_stop=None):
+        """Fetch one report over a span too wide to ask for in one request.
+
+        A day of the sample-received report takes about two minutes on the live
+        HIS and a month takes ten, so a year asked for in one go never comes
+        back. Here it is cut into `chunk_days` chunks, the chunks that have
+        already been fetched are read off disk, and the rest are asked for a few
+        at a time.
+
+        Chunks share their boundary day rather than butting up against each
+        other, so nothing can fall down the gap if the report treats its TO_DATE
+        as exclusive; the rows that come back twice are dropped by the dedupe
+        below. `on_rows` is called with each chunk's new rows as they land, so
+        the board can fill in while the rest of the year is still coming.
+        """
+        self.ensure_token()
+        date_from, date_to = self.date_span(date_from, date_to)
+        chunks = plan_chunks(date_from, date_to, self.config.get('chunk_days', 7))
+        fingerprint = self.report_fingerprint(name, filters)
+
+        state = {
+            'seen': set(),
+            'rows': [],
+            'done': 0,
+            'total': len(chunks),
+            'cached': 0,
+            'fetched': 0,
+            # Chunk size tuning: once a chunk of N days has timed out, every
+            # chunk after it starts at half that rather than spending its own
+            # full timeout discovering the same thing.
+            'ceiling': None,
+        }
+        lock = threading.Lock()
+
+        def stopped():
+            return bool(should_stop and should_stop())
+
+        def report_progress():
+            if on_progress:
+                on_progress({
+                    'done': state['done'],
+                    'total': state['total'],
+                    'cached': state['cached'],
+                    'fetched': state['fetched'],
+                    'rows': len(state['rows']),
+                })
+
+        def collect(rows):
+            """Keep the rows this chunk added, dropping the boundary repeats."""
+            fresh = []
+            with lock:
+                for row in rows:
+                    marker = hashlib.sha1(
+                        json.dumps(row, sort_keys=True, default=str).encode('utf-8')
+                    ).digest()
+                    if marker in state['seen']:
+                        continue
+                    state['seen'].add(marker)
+                    fresh.append(row)
+                state['rows'].extend(fresh)
+                state['done'] += 1
+            if fresh and on_rows:
+                on_rows(fresh)
+            report_progress()
+            return fresh
+
+        def run(span):
+            if stopped():
+                return []
+            chunk_from, chunk_to = span
+            cached = self._cached_chunk(name, chunk_from, chunk_to, fingerprint)
+            if cached is not None:
+                with lock:
+                    state['cached'] += 1
+                return collect(cached)
+            rows = self._fetch_chunk(name, chunk_from, chunk_to, filters,
+                                     fingerprint, state, lock, stopped)
+            with lock:
+                state['fetched'] += 1
+            return collect(rows)
+
+        report_progress()
+        workers = max(1, int(self.config.get('chunk_workers', 3)))
+        if len(chunks) == 1 or workers == 1:
+            for span in chunks:
+                if stopped():
+                    break
+                run(span)
+        else:
+            with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=min(workers, len(chunks)),
+                    thread_name_prefix='his-chunk') as pool:
+                futures = [pool.submit(run, span) for span in chunks]
+                try:
+                    for future in concurrent.futures.as_completed(futures):
+                        future.result()   # re-raise the first chunk that failed
+                except BaseException:
+                    for future in futures:
+                        future.cancel()
+                    raise
+
+        if stopped():
+            raise HISCancelled('The fetch was overtaken by a newer one.')
+        return state['rows']
+
+    def _cached_chunk(self, name, chunk_from, chunk_to, fingerprint):
+        if not (self.cache and self.config.get('cache_enabled', True)):
+            return None
+        return self.cache.get(
+            name, chunk_from, chunk_to, fingerprint,
+            keep_days=self.config.get('cache_days', 30),
+            settle_days=self.config.get('cache_settle_days', 2),
+        )
+
+    def _keep_chunk(self, name, chunk_from, chunk_to, fingerprint, rows):
+        if not (self.cache and self.config.get('cache_enabled', True)):
+            return
+        self.cache.put(
+            name, chunk_from, chunk_to, fingerprint, rows,
+            settle_days=self.config.get('cache_settle_days', 2),
+            max_mb=self.config.get('cache_max_mb', 512),
+        )
+
+    def _fetch_chunk(self, name, chunk_from, chunk_to, filters, fingerprint,
+                     state, lock, stopped):
+        """One chunk off the HIS, halving the span for as long as it times out."""
+        floor = max(1, int(self.config.get('chunk_min_days', 1)))
+        with lock:
+            ceiling = state['ceiling']
+        # An earlier chunk has already shown this size to be too wide, so do not
+        # spend another full timeout proving it again.
+        if ceiling is not None and _span_days(chunk_from, chunk_to) > ceiling:
+            return self._split_chunk(name, chunk_from, chunk_to, filters,
+                                     fingerprint, state, lock, stopped)
+
+        try:
+            rows = self.fetch_report(name, chunk_from, chunk_to, filters)
+        except HISTimeout:
+            span = _span_days(chunk_from, chunk_to)
+            if span <= floor:
+                raise HISTimeout(
+                    f'The {name} report timed out even over {span} day(s) '
+                    f'({chunk_from} to {chunk_to}). Raise "Wait for the HIS" in '
+                    'Advanced, or ask for a narrower range.'
+                )
+            with lock:
+                narrower = max(floor, span // 2)
+                if state['ceiling'] is None or narrower < state['ceiling']:
+                    state['ceiling'] = narrower
+            print(f'[*] {name} {chunk_from}..{chunk_to} timed out over {span} days '
+                  f'— splitting and keeping later chunks to {narrower}.')
+            return self._split_chunk(name, chunk_from, chunk_to, filters,
+                                     fingerprint, state, lock, stopped)
+
+        self._keep_chunk(name, chunk_from, chunk_to, fingerprint, rows)
+        return rows
+
+    def _split_chunk(self, name, chunk_from, chunk_to, filters, fingerprint,
+                     state, lock, stopped):
+        """Halve a chunk and fetch both halves, sharing their boundary day."""
+        start = _as_date(chunk_from)
+        end = _as_date(chunk_to)
+        middle = start + timedelta(days=max(1, (end - start).days // 2))
+        if middle >= end:
+            middle = end - timedelta(days=1)
+        halves = ((chunk_from, middle.strftime('%Y-%m-%d')),
+                  (middle.strftime('%Y-%m-%d'), chunk_to))
+        rows = []
+        for half_from, half_to in halves:
+            if stopped():
+                break
+            cached = self._cached_chunk(name, half_from, half_to, fingerprint)
+            if cached is not None:
+                rows.extend(cached)
+                continue
+            rows.extend(self._fetch_chunk(name, half_from, half_to, filters,
+                                          fingerprint, state, lock, stopped))
+        return rows
