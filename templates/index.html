@@ -1,0 +1,961 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Lab KPIs</title>
+<link rel="icon" href="/static/icon.png">
+<style>
+/* ───────────────────────────────────────────────────────────
+   Colours are declared as roles, once, so the dark set is a
+   swap of values rather than a second stylesheet. The ordinal
+   blue ramp carries the delay buckets; every other chart is a
+   single series, which is why there is no categorical palette
+   here at all.
+   ─────────────────────────────────────────────────────────── */
+:root {
+  color-scheme: light;
+  --page:      #f9f9f7;
+  --surface:   #fcfcfb;
+  --ink:       #0b0b0b;
+  --ink-2:     #52514e;
+  --muted:     #898781;
+  --grid:      #e1e0d9;
+  --axis:      #c3c2b7;
+  --series:    #2a78d6;
+  --border:    rgba(11,11,11,0.10);
+  --shadow:    rgba(11,11,11,0.06);
+  --ramp-1: #86b6ef; --ramp-2: #5598e7; --ramp-3: #2a78d6;
+  --ramp-4: #1c5cab; --ramp-5: #104281;
+  --good:     #0ca30c;
+  --warning:  #fab219;
+  --serious:  #ec835a;
+  --critical: #d03b3b;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page:    #0d0d0d;
+    --surface: #1a1a19;
+    --ink:     #ffffff;
+    --ink-2:   #c3c2b7;
+    --muted:   #898781;
+    --grid:    #2c2c2a;
+    --axis:    #383835;
+    --series:  #3987e5;
+    --border:  rgba(255,255,255,0.10);
+    --shadow:  rgba(0,0,0,0.4);
+    --ramp-1: #b7d3f6; --ramp-2: #86b6ef; --ramp-3: #5598e7;
+    --ramp-4: #2a78d6; --ramp-5: #184f95;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page:    #0d0d0d;
+  --surface: #1a1a19;
+  --ink:     #ffffff;
+  --ink-2:   #c3c2b7;
+  --muted:   #898781;
+  --grid:    #2c2c2a;
+  --axis:    #383835;
+  --series:  #3987e5;
+  --border:  rgba(255,255,255,0.10);
+  --shadow:  rgba(0,0,0,0.4);
+  --ramp-1: #b7d3f6; --ramp-2: #86b6ef; --ramp-3: #5598e7;
+  --ramp-4: #2a78d6; --ramp-5: #184f95;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--page);
+  color: var(--ink);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+[hidden] { display: none !important; }
+
+/* ── top bar ─────────────────────────────────────────── */
+header {
+  position: sticky; top: 0; z-index: 20;
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 10px 20px;
+  padding-top: calc(10px + env(safe-area-inset-top, 0px));
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+h1 { font-size: 15px; font-weight: 650; margin: 0; letter-spacing: -0.01em; }
+.spacer { flex: 1 1 auto; }
+
+.chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px; border-radius: 999px;
+  border: 1px solid var(--border);
+  background: transparent; color: var(--ink-2);
+  font-size: 12px; cursor: pointer;
+}
+.chip:hover { background: var(--page); }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+.dot.live { background: var(--good); }
+.dot.bad  { background: var(--critical); }
+
+button, select, input {
+  font: inherit; color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px; padding: 6px 10px;
+}
+button { cursor: pointer; }
+button:hover:not(:disabled) { background: var(--page); }
+button:disabled { opacity: 0.5; cursor: default; }
+button.primary {
+  background: var(--series); border-color: var(--series);
+  color: #fff; font-weight: 600;
+}
+button.primary:hover:not(:disabled) { filter: brightness(1.06); background: var(--series); }
+
+/* ── filters: one row above the charts ───────────────── */
+.filters {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 12px 20px; border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.segmented { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.segmented button {
+  border: 0; border-radius: 0; background: transparent;
+  padding: 6px 12px; font-size: 13px; color: var(--ink-2);
+}
+.segmented button + button { border-left: 1px solid var(--border); }
+.segmented button[aria-pressed="true"] { background: var(--series); color: #fff; font-weight: 600; }
+.filters label { font-size: 12px; color: var(--muted); }
+
+/* ── layout ──────────────────────────────────────────── */
+main { padding: 16px 20px 40px; }
+.tiles {
+  display: grid; gap: 12px; margin-bottom: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+.grid {
+  display: grid; gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+}
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px; padding: 14px 16px;
+  min-width: 0;
+}
+.card.wide { grid-column: 1 / -1; }
+.card h2 {
+  font-size: 13px; font-weight: 600; margin: 0 0 2px;
+  color: var(--ink);
+}
+.card p.sub { font-size: 12px; color: var(--muted); margin: 0 0 12px; }
+
+.tile .value {
+  font-size: 30px; font-weight: 640; letter-spacing: -0.02em;
+  line-height: 1.15; margin: 4px 0 0;
+}
+.tile .unit { font-size: 15px; font-weight: 500; color: var(--ink-2); }
+.tile .note { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.status-line { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; margin-top: 4px; }
+.status-line svg { flex: none; width: 14px; height: 14px; }
+
+/* Charts are drawn at the width they are measured to occupy, so a viewBox is
+   never scaled up and the type never balloons with the card. */
+figure { margin: 0; }
+figure svg { display: block; overflow: visible; }
+.chart-empty { color: var(--muted); font-size: 13px; padding: 24px 0; text-align: center; }
+
+/* ── table view ──────────────────────────────────────── */
+.table-wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+th { color: var(--muted); font-weight: 600; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.wrap { white-space: normal; min-width: 240px; }
+
+/* ── tooltip ─────────────────────────────────────────── */
+#tip {
+  position: fixed; z-index: 60; pointer-events: none;
+  background: var(--surface); color: var(--ink);
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 7px 10px; font-size: 12.5px; line-height: 1.45;
+  box-shadow: 0 4px 14px var(--shadow);
+  max-width: 300px;
+}
+#tip b { font-weight: 600; }
+#tip .k { color: var(--muted); }
+
+/* ── sign-in ─────────────────────────────────────────── */
+#signin {
+  position: fixed; inset: 0; z-index: 80;
+  display: grid; place-items: center;
+  background: var(--page);
+  padding: 20px;
+}
+.panel {
+  width: min(420px, 100%);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px; padding: 22px;
+}
+.panel h2 { margin: 0 0 4px; font-size: 17px; cursor: default; user-select: none; }
+.panel p.hint { margin: 0 0 18px; font-size: 13px; color: var(--muted); }
+.field { margin-bottom: 12px; }
+.field label { display: block; font-size: 12px; color: var(--ink-2); margin-bottom: 4px; }
+.field input, .field select { width: 100%; }
+.error {
+  border-left: 3px solid var(--critical);
+  background: color-mix(in srgb, var(--critical) 8%, transparent);
+  padding: 8px 10px; border-radius: 0 8px 8px 0;
+  font-size: 12.5px; margin-bottom: 12px;
+}
+details.advanced { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px; }
+details.advanced summary { font-size: 12px; color: var(--muted); cursor: pointer; }
+.advanced .field { margin-top: 10px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Lab KPIs</h1>
+  <button class="chip" id="hisChip" type="button" title="HIS connection">
+    <span class="dot" id="hisDot"></span><span id="hisText">Not signed in</span>
+  </button>
+  <span class="spacer"></span>
+  <span id="stamp" style="font-size:12px;color:var(--muted)"></span>
+  <button id="refresh" type="button">Refresh</button>
+</header>
+
+<div class="filters">
+  <label for="rangeSeg">Range</label>
+  <div class="segmented" id="rangeSeg" role="group" aria-label="Date range">
+    <button type="button" data-days="0">Today</button>
+    <button type="button" data-days="6">7 days</button>
+    <button type="button" data-days="29">30 days</button>
+    <button type="button" data-days="89">90 days</button>
+    <button type="button" data-days="364">1 year</button>
+  </div>
+  <label for="siteSel">Site</label>
+  <select id="siteSel"><option value="">All sites</option></select>
+  <label for="deptSel">Department</label>
+  <select id="deptSel"><option value="">All departments</option></select>
+  <span class="spacer"></span>
+  <button id="tableToggle" type="button" aria-pressed="false">Table view</button>
+</div>
+
+<main>
+  <section class="tiles" id="tiles"></section>
+  <section class="grid" id="charts"></section>
+</main>
+
+<div id="tip" hidden></div>
+
+<!-- Sign-in. Present from the first paint, so nobody sees an empty board and
+     wonders what is broken. -->
+<div id="signin">
+  <form class="panel" id="signinForm" autocomplete="off">
+    <h2 id="signinTitle">Sign in to the HIS</h2>
+    <p class="hint">Your own HIS user id and password. Nothing is saved to disk.</p>
+    <div class="error" id="signinError" hidden></div>
+    <div class="field">
+      <label for="username">User Id</label>
+      <input id="username" name="username" autocomplete="username" required>
+    </div>
+    <div class="field">
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+    </div>
+    <button class="primary" type="submit" id="signinBtn" style="width:100%">Sign In</button>
+
+    <details class="advanced" id="advanced" hidden>
+      <summary>Advanced — settings for whoever sets this PC up</summary>
+      <div class="field">
+        <label for="portalUrl">Login page URL</label>
+        <input id="portalUrl">
+      </div>
+      <div class="field">
+        <label for="baseUrl">Report API URL</label>
+        <input id="baseUrl">
+      </div>
+      <div class="field">
+        <label for="authUrl">Sign-in API URL</label>
+        <input id="authUrl">
+      </div>
+      <div class="field">
+        <label for="loginSite">Site</label>
+        <input id="loginSite">
+      </div>
+      <div class="field">
+        <label for="pollInterval">Refresh every (seconds)</label>
+        <input id="pollInterval" type="number" min="30" step="30">
+      </div>
+      <div class="field">
+        <label for="browserPath">Browser for signing in (blank = the one on this PC)</label>
+        <input id="browserPath">
+      </div>
+      <div class="field">
+        <label><input type="checkbox" id="verifySsl" style="width:auto"> Verify the HIS certificate</label>
+      </div>
+      <div class="field">
+        <label for="token">Bearer token (break glass — lasts about an hour)</label>
+        <input id="token" placeholder="eyJ…">
+      </div>
+      <button type="button" id="saveSettings">Save settings</button>
+      <button type="button" id="useToken">Use token</button>
+    </details>
+  </form>
+</div>
+
+<script>
+'use strict';
+
+/* ───────────────────────────────────────────────────────────
+   State
+   ─────────────────────────────────────────────────────────── */
+let state = { dashboard: null, his: null, tableView: false };
+
+const $  = (id) => document.getElementById(id);
+const el = (tag, attrs = {}, kids = []) => {
+  const node = document.createElementNS(
+    tag === 'svg' || SVG_TAGS.has(tag) ? 'http://www.w3.org/2000/svg' : 'http://www.w3.org/1999/xhtml', tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v === null || v === undefined) continue;
+    if (k === 'text') node.textContent = v;
+    else if (k === 'class') node.setAttribute('class', v);
+    else node.setAttribute(k, v);
+  }
+  for (const kid of [].concat(kids)) if (kid) node.appendChild(kid);
+  return node;
+};
+const SVG_TAGS = new Set(['g', 'rect', 'path', 'line', 'text', 'circle', 'polyline', 'title']);
+
+const fmt = (n) => (n === null || n === undefined) ? '—' : n.toLocaleString();
+
+/** Minutes as the unit a person would say out loud. */
+function duration(mins) {
+  if (mins === null || mins === undefined) return '—';
+  if (mins < 60) return `${Math.round(mins)} min`;
+  if (mins < 1440) {
+    const h = Math.floor(mins / 60), m = Math.round(mins % 60);
+    return m ? `${h}h ${m}m` : `${h}h`;
+  }
+  const d = Math.floor(mins / 1440), h = Math.round((mins % 1440) / 60);
+  return h ? `${d}d ${h}h` : `${d}d`;
+}
+
+function shortDate(iso) {
+  const d = new Date(iso + 'T00:00:00');
+  if (isNaN(d)) return iso;
+  return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+}
+
+/* ───────────────────────────────────────────────────────────
+   Tooltip — every mark has one; that is what makes a chart in
+   a browser worth more than a picture of a chart.
+   ─────────────────────────────────────────────────────────── */
+const tip = $('tip');
+function showTip(evt, html) {
+  tip.innerHTML = html;
+  tip.hidden = false;
+  const box = tip.getBoundingClientRect();
+  let x = evt.clientX + 14, y = evt.clientY + 14;
+  if (x + box.width > window.innerWidth - 8) x = evt.clientX - box.width - 14;
+  if (y + box.height > window.innerHeight - 8) y = evt.clientY - box.height - 14;
+  tip.style.left = Math.max(8, x) + 'px';
+  tip.style.top = Math.max(8, y) + 'px';
+}
+function hideTip() { tip.hidden = true; }
+function hoverable(node, html) {
+  node.addEventListener('mousemove', (e) => showTip(e, html));
+  node.addEventListener('mouseleave', hideTip);
+  node.appendChild(el('title', { text: html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() }));
+}
+
+/* ───────────────────────────────────────────────────────────
+   Charts
+   Plain SVG. One series each, so the title names the series and
+   no legend is needed; the delay buckets are the one ordered
+   scale and they carry the blue ramp, darkening with the wait.
+   ─────────────────────────────────────────────────────────── */
+
+/** A rect whose far end is rounded — the data end, anchored to the baseline. */
+function barPath(x, y, w, h, r, dir) {
+  r = Math.max(0, Math.min(r, dir === 'right' ? w : h));
+  if (dir === 'right') {
+    return `M${x},${y} H${x + w - r} A${r},${r} 0 0 1 ${x + w},${y + r}`
+         + ` V${y + h - r} A${r},${r} 0 0 1 ${x + w - r},${y + h} H${x} Z`;
+  }
+  return `M${x},${y + r} A${r},${r} 0 0 1 ${x + r},${y} H${x + w - r}`
+       + ` A${r},${r} 0 0 1 ${x + w},${y + r} V${y + h} H${x} Z`;
+}
+
+function emptyNote(message) {
+  return el('div', { class: 'chart-empty', text: message });
+}
+
+/** Horizontal bars: the form for ranked categories with long names. */
+function hbar(data, opts = {}) {
+  if (!data.length || data.every(d => !d.value)) return emptyNote('Nothing in this range.');
+  const rows = data.length;
+  const width = opts.width || 640;
+  const rowH = 26, gap = 6, padR = 56, top = 4;
+  // Names need room, but never more than a third of a narrow card.
+  const padL = Math.round(Math.max(80, Math.min(opts.labelWidth || 190, width * 0.38)));
+  const height = top + rows * rowH + 4;
+  const plotW = width - padL - padR;
+  const max = Math.max(...data.map(d => d.value)) || 1;
+  const total = data.reduce((a, d) => a + d.value, 0) || 1;
+
+  const svg = el('svg', {
+    viewBox: `0 0 ${width} ${height}`, width, height, role: 'img',
+    'aria-label': opts.label || 'Bar chart',
+  });
+
+  data.forEach((d, i) => {
+    const y = top + i * rowH;
+    const h = rowH - gap;
+    const w = Math.max(2, (d.value / max) * plotW);
+    const fill = opts.ramp ? `var(--ramp-${Math.min(5, i + 1)})` : 'var(--series)';
+
+    svg.appendChild(el('text', {
+      x: padL - 10, y: y + h / 2 + 4, 'text-anchor': 'end',
+      fill: 'var(--ink-2)', 'font-size': '12.5',
+      text: clip(d.label, Math.max(8, Math.floor(padL / 7.4))),
+    }));
+    const bar = el('path', { d: barPath(padL, y, w, h, 4, 'right'), fill });
+    hoverable(bar, `<b>${escapeHtml(d.label)}</b><br>${fmt(d.value)} `
+      + `${opts.unit || 'samples'} <span class="k">· ${(100 * d.value / total).toFixed(1)}%</span>`);
+    svg.appendChild(bar);
+    svg.appendChild(el('text', {
+      x: padL + w + 8, y: y + h / 2 + 4, fill: 'var(--ink-2)',
+      'font-size': '12.5', 'font-variant-numeric': 'tabular-nums', text: fmt(d.value),
+    }));
+  });
+  return svg;
+}
+
+/** Vertical columns: counts per day, per hour — a time axis reads left to right. */
+function columns(data, opts = {}) {
+  if (!data.length) return emptyNote('Nothing in this range.');
+  const width = opts.width || 640, height = opts.height || 220;
+  const padL = 40, padR = 8, padT = 12, padB = 30;
+  const plotW = width - padL - padR, plotH = height - padT - padB;
+  const max = Math.max(...data.map(d => d.value), 1);
+  const step = plotW / data.length;
+  const barW = Math.max(1, Math.min(step - 2, 46));   // 2px of surface between bars
+
+  const svg = el('svg', {
+    viewBox: `0 0 ${width} ${height}`, width, height, role: 'img',
+    'aria-label': opts.label || 'Column chart',
+  });
+
+  for (const t of ticks(max)) {
+    const y = padT + plotH - (t / max) * plotH;
+    svg.appendChild(el('line', { x1: padL, x2: width - padR, y1: y, y2: y, stroke: 'var(--grid)', 'stroke-width': 1 }));
+    svg.appendChild(el('text', { x: padL - 8, y: y + 4, 'text-anchor': 'end', fill: 'var(--muted)', 'font-size': '11', text: fmt(t) }));
+  }
+  svg.appendChild(el('line', {
+    x1: padL, x2: width - padR, y1: padT + plotH, y2: padT + plotH,
+    stroke: 'var(--axis)', 'stroke-width': 1,
+  }));
+
+  const every = Math.ceil(data.length / Math.max(3, Math.floor(width / 70)));
+  data.forEach((d, i) => {
+    const x = padL + i * step + (step - barW) / 2;
+    const h = (d.value / max) * plotH;
+    if (d.value > 0) {
+      const bar = el('path', {
+        d: barPath(x, padT + plotH - h, barW, h, Math.min(4, barW / 2), 'up'),
+        fill: 'var(--series)',
+      });
+      hoverable(bar, `<b>${escapeHtml(opts.tipLabel ? opts.tipLabel(d.label) : d.label)}</b><br>`
+        + `${fmt(d.value)} ${opts.unit || 'samples'}`);
+      svg.appendChild(bar);
+    } else {
+      // A zero still needs a hit target, or a quiet day is unhoverable.
+      const hit = el('rect', { x, y: padT, width: barW, height: plotH, fill: 'transparent' });
+      hoverable(hit, `<b>${escapeHtml(opts.tipLabel ? opts.tipLabel(d.label) : d.label)}</b><br>none`);
+      svg.appendChild(hit);
+    }
+    if (i % every === 0 || i === data.length - 1) {
+      svg.appendChild(el('text', {
+        x: x + barW / 2, y: height - 10, 'text-anchor': 'middle',
+        fill: 'var(--muted)', 'font-size': '11',
+        text: opts.tick ? opts.tick(d.label) : d.label,
+      }));
+    }
+  });
+  return svg;
+}
+
+/** A line, for spans too long to give every day its own bar. */
+function line(data, opts = {}) {
+  if (data.length < 2) return columns(data, opts);
+  const width = opts.width || 640, height = opts.height || 220;
+  const padL = 40, padR = 8, padT = 12, padB = 30;
+  const plotW = width - padL - padR, plotH = height - padT - padB;
+  const max = Math.max(...data.map(d => d.value), 1);
+  const x = (i) => padL + (i / (data.length - 1)) * plotW;
+  const y = (v) => padT + plotH - (v / max) * plotH;
+
+  const svg = el('svg', {
+    viewBox: `0 0 ${width} ${height}`, width, height, role: 'img',
+    'aria-label': opts.label || 'Line chart',
+  });
+
+  for (const t of ticks(max)) {
+    const ty = y(t);
+    svg.appendChild(el('line', { x1: padL, x2: width - padR, y1: ty, y2: ty, stroke: 'var(--grid)', 'stroke-width': 1 }));
+    svg.appendChild(el('text', { x: padL - 8, y: ty + 4, 'text-anchor': 'end', fill: 'var(--muted)', 'font-size': '11', text: fmt(t) }));
+  }
+
+  const points = data.map((d, i) => `${x(i)},${y(d.value)}`).join(' ');
+  svg.appendChild(el('path', {
+    d: `M${padL},${padT + plotH} L${points.replace(/ /g, ' L')} L${x(data.length - 1)},${padT + plotH} Z`,
+    fill: 'var(--series)', opacity: '0.10',
+  }));
+  svg.appendChild(el('polyline', {
+    points, fill: 'none', stroke: 'var(--series)', 'stroke-width': 2,
+    'stroke-linejoin': 'round', 'stroke-linecap': 'round',
+  }));
+
+  const marker = el('circle', { r: 4.5, fill: 'var(--series)', stroke: 'var(--surface)', 'stroke-width': 2, opacity: '0' });
+  const rule = el('line', { y1: padT, y2: padT + plotH, stroke: 'var(--axis)', 'stroke-width': 1, opacity: '0' });
+  svg.appendChild(rule); svg.appendChild(marker);
+
+  const surface = el('rect', { x: padL, y: padT, width: plotW, height: plotH, fill: 'transparent' });
+  surface.addEventListener('mousemove', (evt) => {
+    const box = svg.getBoundingClientRect();
+    const px = ((evt.clientX - box.left) / box.width) * width;
+    const i = Math.max(0, Math.min(data.length - 1, Math.round(((px - padL) / plotW) * (data.length - 1))));
+    const d = data[i];
+    marker.setAttribute('cx', x(i)); marker.setAttribute('cy', y(d.value));
+    marker.setAttribute('opacity', '1');
+    rule.setAttribute('x1', x(i)); rule.setAttribute('x2', x(i)); rule.setAttribute('opacity', '1');
+    showTip(evt, `<b>${escapeHtml(opts.tipLabel ? opts.tipLabel(d.label) : d.label)}</b><br>`
+      + `${fmt(d.value)} ${opts.unit || 'samples'}`);
+  });
+  surface.addEventListener('mouseleave', () => {
+    marker.setAttribute('opacity', '0'); rule.setAttribute('opacity', '0'); hideTip();
+  });
+  svg.appendChild(surface);
+
+  const every = Math.ceil(data.length / Math.max(3, Math.floor(width / 90)));
+  data.forEach((d, i) => {
+    if (i % every && i !== data.length - 1) return;
+    svg.appendChild(el('text', {
+      x: x(i), y: height - 10, 'text-anchor': 'middle', fill: 'var(--muted)',
+      'font-size': '11', text: opts.tick ? opts.tick(d.label) : d.label,
+    }));
+  });
+  return svg;
+}
+
+function ticks(max) {
+  const raw = max / 4;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw || 1)));
+  const stepSize = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => s >= raw) || mag * 10;
+  const out = [];
+  for (let t = 0; t <= max + 1e-9; t += stepSize) out.push(Math.round(t));
+  return out;
+}
+
+const clip = (s, n) => (s && s.length > n) ? s.slice(0, n - 1) + '…' : (s || '');
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+/* ───────────────────────────────────────────────────────────
+   Tiles
+   ─────────────────────────────────────────────────────────── */
+const ICONS = {
+  good:     'M20 6 9 17l-5-5',
+  warning:  'M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z',
+  critical: 'M12 8v5M12 16h.01M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z',
+};
+
+/** Status never rides on colour alone — every one carries its icon and word. */
+function statusLine(kind, words) {
+  const svg = el('svg', { width: '14', height: '14', viewBox: '0 0 24 24', fill: 'none' }, [
+    el('path', {
+      d: ICONS[kind], stroke: `var(--${kind})`, 'stroke-width': '2.2',
+      'stroke-linecap': 'round', 'stroke-linejoin': 'round',
+    }),
+  ]);
+  const span = el('span', { class: 'status-line' });
+  span.appendChild(svg);
+  span.appendChild(el('span', { text: words, style: `color: var(--${kind})` }));
+  return span;
+}
+
+function tile(title, value, unit, note, status) {
+  const card = el('div', { class: 'card tile' });
+  card.appendChild(el('h2', { text: title }));
+  const v = el('p', { class: 'value', text: value });
+  if (unit) v.appendChild(el('span', { class: 'unit', text: ' ' + unit }));
+  card.appendChild(v);
+  if (status) card.appendChild(status);
+  if (note) card.appendChild(el('div', { class: 'note', text: note }));
+  return card;
+}
+
+/** How a lab would grade a waiting time. */
+function gradeDelay(mins) {
+  if (mins === null || mins === undefined) return null;
+  if (mins < 240) return statusLine('good', 'within four hours');
+  if (mins < 1440) return statusLine('warning', 'same day');
+  return statusLine('critical', 'over a day');
+}
+
+/* ───────────────────────────────────────────────────────────
+   Render
+   ─────────────────────────────────────────────────────────── */
+/* A chart is drawn only once its card is on the page and can be measured, and
+   again whenever the window changes size — an SVG stretched to fit would carry
+   its type along with it. */
+const pending = [];
+
+function card(title, sub, draw, wide) {
+  const node = el('div', { class: wide ? 'card wide' : 'card' });
+  node.appendChild(el('h2', { text: title }));
+  if (sub) node.appendChild(el('p', { class: 'sub', text: sub }));
+  const fig = el('figure');
+  node.appendChild(fig);
+  pending.push({ fig, draw });
+  return node;
+}
+
+function drawCharts() {
+  for (const { fig, draw } of pending) {
+    const width = Math.max(240, Math.floor(fig.clientWidth || fig.parentElement.clientWidth || 640));
+    fig.replaceChildren(draw(width));
+  }
+}
+
+let resizeTimer = null;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(drawCharts, 150);
+});
+
+function render() {
+  const data = state.dashboard;
+  if (!data) return;
+  const k = data.kpis;
+
+  // ── tiles ──
+  const tiles = $('tiles');
+  tiles.replaceChildren(
+    tile('Samples received', fmt(k.totals.samples), '',
+         `${fmt(k.totals.patients)} patients · ${fmt(k.totals.tests)} distinct tests`),
+    tile('Collection → acceptance', duration(k.delay.median), '',
+         `median of ${fmt(k.delay.count)} samples`, gradeDelay(k.delay.median)),
+    tile('Slowest tenth', duration(k.delay.p90), '',
+         '90th percentile — one sample in ten waits at least this long',
+         gradeDelay(k.delay.p90)),
+    tile('Order → acceptance', duration(k.entry_delay.median), '',
+         `median of ${fmt(k.entry_delay.count)} samples`),
+  );
+
+  // ── charts ──
+  const charts = $('charts');
+  charts.replaceChildren();
+  pending.length = 0;
+
+  const days = k.per_day;
+  charts.appendChild(card('Samples received per day',
+    `${data.range.from || ''} to ${data.range.to || ''}`,
+    (width) => {
+      const opts = { width, height: 260, tick: shortDate, tipLabel: shortDate,
+                     label: 'Samples received per day' };
+      // Past a point every day cannot have a bar of its own without them
+      // turning into a comb; a line carries the shape better.
+      return days.length > 45 ? line(days, opts) : columns(days, opts);
+    }, true));
+
+  charts.appendChild(card('How long samples waited',
+    'Collection to acceptance. Darker is longer.',
+    (width) => hbar(k.buckets, { width, ramp: true, labelWidth: 110,
+                                 label: 'Wait before acceptance' })));
+
+  charts.appendChild(card('Acceptance by hour of day',
+    'When the accepting actually happens.',
+    (width) => columns(k.per_hour, { width, tick: (h) => h,
+      tipLabel: (h) => `${h}:00–${h}:59`, label: 'Acceptance by hour' })));
+
+  charts.appendChild(card('By department', null,
+    (width) => hbar(k.by_department, { width, label: 'Samples by department' })));
+  charts.appendChild(card('By site', null,
+    (width) => hbar(k.by_site, { width, label: 'Samples by site' })));
+  charts.appendChild(card('By category', 'Top 12.',
+    (width) => hbar(k.by_category, { width, labelWidth: 150, label: 'Samples by category' })));
+  charts.appendChild(card('By patient location', null,
+    (width) => hbar(k.by_location, { width, labelWidth: 110, label: 'Samples by patient location' })));
+  charts.appendChild(card('Accepted by', 'Top 10.',
+    (width) => hbar(k.by_acceptor, { width, labelWidth: 220, label: 'Samples by acceptor' })));
+  charts.appendChild(card('Received by', 'Top 10.',
+    (width) => hbar(k.by_receiver, { width, labelWidth: 220, label: 'Samples by receiver' })));
+
+  // ── the samples that waited longest ──
+  if (k.slowest.length) {
+    const node = el('div', { class: 'card wide' });
+    node.appendChild(el('h2', { text: 'Waited longest' }));
+    node.appendChild(el('p', { class: 'sub', text: 'The fifteen samples with the widest gap between collection and acceptance.' }));
+    const wrap = el('div', { class: 'table-wrap' });
+    const table = el('table');
+    const head = el('tr');
+    for (const h of ['Sample', 'Category', 'Test', 'Department', 'Collected', 'Accepted', 'Waited'])
+      head.appendChild(el('th', { text: h }));
+    table.appendChild(el('thead', {}, [head]));
+    const body = el('tbody');
+    for (const r of k.slowest) {
+      const tr = el('tr');
+      tr.appendChild(el('td', { text: r.sample }));
+      tr.appendChild(el('td', { text: r.category }));
+      tr.appendChild(el('td', { class: 'wrap', text: clip(r.test, 70) }));
+      tr.appendChild(el('td', { text: r.department }));
+      tr.appendChild(el('td', { text: r.collected }));
+      tr.appendChild(el('td', { text: r.accepted }));
+      tr.appendChild(el('td', { class: 'num', text: duration(r.minutes) }));
+      body.appendChild(tr);
+    }
+    table.appendChild(body);
+    wrap.appendChild(table);
+    node.appendChild(wrap);
+    charts.appendChild(node);
+  }
+
+  if (state.tableView) charts.appendChild(tableView(k));
+
+  drawCharts();
+
+  // ── filter choices, without losing what is selected ──
+  fillSelect($('siteSel'), data.choices.sites, data.view.site, 'All sites');
+  fillSelect($('deptSel'), data.choices.departments, data.view.department, 'All departments');
+  for (const btn of $('rangeSeg').children)
+    btn.setAttribute('aria-pressed', String(Number(btn.dataset.days) === data.view.days_back));
+
+  $('stamp').textContent = data.fetched_at
+    ? 'Updated ' + new Date(data.fetched_at).toLocaleTimeString()
+    : '';
+}
+
+/** Every chart's numbers, readable without seeing colour at all. */
+function tableView(k) {
+  const node = el('div', { class: 'card wide' });
+  node.appendChild(el('h2', { text: 'The numbers' }));
+  node.appendChild(el('p', { class: 'sub', text: 'Every chart above, as a table.' }));
+  const wrap = el('div', { class: 'table-wrap' });
+  const groups = [
+    ['Wait before acceptance', k.buckets],
+    ['Per day', k.per_day],
+    ['By hour', k.per_hour],
+    ['By department', k.by_department],
+    ['By site', k.by_site],
+    ['By category', k.by_category],
+    ['By patient location', k.by_location],
+    ['Accepted by', k.by_acceptor],
+    ['Received by', k.by_receiver],
+  ];
+  const table = el('table');
+  const head = el('tr');
+  for (const h of ['Chart', 'Label', 'Samples']) head.appendChild(el('th', { text: h }));
+  table.appendChild(el('thead', {}, [head]));
+  const body = el('tbody');
+  for (const [name, rows] of groups) {
+    for (const r of rows) {
+      const tr = el('tr');
+      tr.appendChild(el('td', { text: name }));
+      tr.appendChild(el('td', { class: 'wrap', text: r.label }));
+      tr.appendChild(el('td', { class: 'num', text: fmt(r.value) }));
+      body.appendChild(tr);
+    }
+  }
+  table.appendChild(body);
+  wrap.appendChild(table);
+  node.appendChild(wrap);
+  return node;
+}
+
+function fillSelect(select, values, chosen, allLabel) {
+  const current = select.value;
+  select.replaceChildren(el('option', { value: '', text: allLabel }));
+  for (const v of values) select.appendChild(el('option', { value: v, text: v }));
+  select.value = values.includes(chosen) ? chosen : (values.includes(current) ? current : '');
+}
+
+/* ───────────────────────────────────────────────────────────
+   The HIS chip
+   ─────────────────────────────────────────────────────────── */
+function renderHis() {
+  const s = state.his;
+  if (!s) return;
+  const dot = $('hisDot'), label = $('hisText');
+  dot.className = 'dot';
+  if (s.fetching) { label.textContent = 'Fetching…'; dot.classList.add('live'); }
+  else if (s.error) { label.textContent = 'HIS: problem'; dot.classList.add('bad'); }
+  else if (s.logged_in) {
+    const mins = Math.max(0, Math.round(s.expires_in / 60));
+    label.textContent = s.can_renew ? 'HIS: live' : `HIS: ${mins} min left`;
+    dot.classList.add('live');
+  } else { label.textContent = 'Not signed in'; }
+
+  $('signin').hidden = !!s.logged_in;
+  $('refresh').disabled = !s.logged_in || s.fetching;
+
+  if (s.error && !s.logged_in) showError(s.error);
+
+  const c = s.config || {};
+  setIfIdle('portalUrl', c.portal_url);
+  setIfIdle('baseUrl', c.base_url);
+  setIfIdle('authUrl', c.auth_url);
+  setIfIdle('loginSite', c.login_site);
+  setIfIdle('pollInterval', c.poll_interval);
+  setIfIdle('browserPath', c.browser_path);
+  if (document.activeElement !== $('verifySsl')) $('verifySsl').checked = c.verify_ssl !== false;
+}
+
+function setIfIdle(id, value) {
+  const node = $(id);
+  if (node && document.activeElement !== node && value !== undefined && node.value === '') node.value = value ?? '';
+}
+
+function showError(message) {
+  const box = $('signinError');
+  box.textContent = message;
+  box.hidden = !message;
+}
+
+/* ───────────────────────────────────────────────────────────
+   Talking to the server
+   ─────────────────────────────────────────────────────────── */
+async function api(path, body) {
+  const res = await fetch(path, body === undefined ? {} : {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `The server answered ${res.status}.`);
+  return data;
+}
+
+async function pull() {
+  try {
+    const data = await api('/api/dashboard');
+    state.dashboard = data.dashboard;
+    state.his = data.his;
+    renderHis();
+    render();
+  } catch (e) {
+    // A server that has stopped is the usual reason; the window is closing.
+  }
+}
+
+/* The page says it is still open. The server stops when this goes quiet, so a
+   reload is survivable but a closed window is not. */
+setInterval(() => { fetch('/api/alive', { method: 'POST' }).catch(() => {}); }, 3000);
+fetch('/api/alive', { method: 'POST' }).catch(() => {});
+
+setInterval(pull, 5000);
+pull();
+
+/* ───────────────────────────────────────────────────────────
+   Controls
+   ─────────────────────────────────────────────────────────── */
+$('signinForm').addEventListener('submit', async (evt) => {
+  evt.preventDefault();
+  showError('');
+  const btn = $('signinBtn');
+  btn.disabled = true; btn.textContent = 'Signing in…';
+  try {
+    await api('/api/his/login', {
+      username: $('username').value,
+      password: $('password').value,
+    });
+    $('password').value = '';
+    await pull();
+  } catch (e) {
+    showError(e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Sign In';
+  }
+});
+
+$('hisChip').addEventListener('click', async () => {
+  if (!state.his || !state.his.logged_in) { $('signin').hidden = false; return; }
+  if (confirm('Sign out of the HIS? The board empties until somebody signs in again.')) {
+    await api('/api/his/logout', {});
+    await pull();
+  }
+});
+
+$('refresh').addEventListener('click', async () => {
+  $('refresh').disabled = true;
+  try { await api('/api/his/fetch', {}); } catch (e) { alert(e.message); }
+  await pull();
+});
+
+$('rangeSeg').addEventListener('click', async (evt) => {
+  const btn = evt.target.closest('button');
+  if (!btn) return;
+  await api('/api/view', { days_back: Number(btn.dataset.days) });
+  await pull();
+});
+
+for (const [id, key] of [['siteSel', 'site'], ['deptSel', 'department']]) {
+  $(id).addEventListener('change', async () => {
+    await api('/api/view', { [key]: $(id).value });
+    await pull();
+  });
+}
+
+$('tableToggle').addEventListener('click', () => {
+  state.tableView = !state.tableView;
+  $('tableToggle').setAttribute('aria-pressed', String(state.tableView));
+  render();
+});
+
+/* Advanced settings are hidden: none of it is the staff's business, and a wrong
+   value there breaks the dashboard for everyone on this PC. Five clicks on the
+   title brings it back — the app window has no address bar for ?advanced=1. */
+let titleClicks = 0, titleTimer = null;
+$('signinTitle').addEventListener('click', () => {
+  titleClicks += 1;
+  clearTimeout(titleTimer);
+  titleTimer = setTimeout(() => { titleClicks = 0; }, 1200);
+  if (titleClicks >= 5) { $('advanced').hidden = false; $('advanced').open = true; titleClicks = 0; }
+});
+if (new URLSearchParams(location.search).get('advanced') === '1') {
+  $('advanced').hidden = false;
+}
+
+$('saveSettings').addEventListener('click', async () => {
+  try {
+    await api('/api/his/config', {
+      portal_url: $('portalUrl').value,
+      base_url: $('baseUrl').value,
+      auth_url: $('authUrl').value,
+      login_site: $('loginSite').value,
+      poll_interval: Number($('pollInterval').value) || undefined,
+      browser_path: $('browserPath').value,
+      verify_ssl: $('verifySsl').checked,
+    });
+    showError('');
+    alert('Settings saved.');
+  } catch (e) { showError(e.message); }
+});
+
+$('useToken').addEventListener('click', async () => {
+  try {
+    await api('/api/his/token', { token: $('token').value });
+    $('token').value = '';
+    await pull();
+  } catch (e) { showError(e.message); }
+});
+</script>
+</body>
+</html>

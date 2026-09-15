@@ -1,0 +1,8 @@
+# Flask is the only thing the dashboard needs. Signing in uses the Edge or
+# Chrome already on the PC over its DevTools protocol, the HIS calls use the
+# standard library, and the charts are drawn in the page with no chart library
+# and nothing fetched from the internet.
+flask>=3.0
+
+# For the build only:
+# pyinstaller
