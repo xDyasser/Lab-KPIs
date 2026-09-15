@@ -70,6 +70,8 @@ BASE_DIR = _base_dir()
 DATA_DIR = _data_dir()
 HIS_CONFIG_FILE = os.path.join(DATA_DIR, 'his_config.json')
 VIEW_FILE = os.path.join(DATA_DIR, 'view.json')
+# The expected turnaround per test, typed in on the TAT tabs.
+TARGETS_FILE = os.path.join(DATA_DIR, 'targets.json')
 # Fetched report chunks, kept between runs so a year costs a year once. This is
 # the one place the dashboard writes patient data down — see "Waiting for the
 # HIS" in the README, and the switch for it in Advanced.
@@ -111,6 +113,16 @@ COL_ACCEPTED_BY = 'SAMPLE_ACCEPTANCE_BY'
 COL_ACCEPT_DEPT = 'DEPARTMENT_SAMPLE_ACCEPTANCE_BY'
 COL_SITE = 'SITE_NAME'
 
+# The linked reports the four KPI tabs are built from, by file name. Each tab
+# reads that report's own rows rather than the columns joined onto the samples:
+# a rejection or a critical result is a row per analyte, and the join keeps only
+# the first of them (see join_linked_reports), which is the whole sample's story
+# but not each test's.
+REPORT_REJECTIONS = 'sample_rejections'
+REPORT_CRITICAL = 'critical_results'
+REPORT_STAT = 'stat_tests'
+REPORT_RESULT_TIME = 'result_time'
+
 
 def column(row, name, default=''):
     """Read a column, forgiving the HIS's spacing and underscores."""
@@ -142,6 +154,11 @@ store = {
     'to': None,
     'fetched_at': None,
     'linked': {},      # report name → how many of its rows found a sample
+    # Every linked report's own rows, as they came back. The KPI tabs are built
+    # from these: one sample's rejection has a row per analyte and the join onto
+    # the samples keeps only the first, so a tab that counts reasons or filters
+    # by service name has to read the report itself.
+    'linked_rows': {},
     # A wide span arrives a chunk at a time and a year takes a while, so the
     # board says how far along it is rather than sitting blank. `partial` marks
     # rows that are only some of the span — the numbers under them are real but
@@ -155,9 +172,21 @@ store = {
 view = {
     'days_back': 7,
     'days_ahead': 0,
-    'site': '',        # '' means every site
     'department': '',
+    # One chosen test per tab, because a tab is a different report with its own
+    # spelling of the name — 'SERVICE_NAME' on the rejections, 'TEST_NAME' on
+    # the STAT report — and a name picked on one is rarely a name on another.
+    # '' means every test. Keyed by tab id: overview, rejections, critical,
+    # referred_tat, inhouse_tat.
+    'tests': {},
 }
+
+# A test's expected turnaround, in minutes, keyed by the test's name flattened
+# through match_key(). One list, shared by both TAT tabs, edited on the tabs
+# themselves and kept next to the view settings. A test nobody has set a time
+# for is measured against DEFAULT_TARGET rather than left out.
+DEFAULT_TARGET = 60
+targets = {}
 
 
 def load_view():
@@ -193,15 +222,59 @@ def clean_view():
     # dashboard looks broken rather than busy.
     view['days_back'] = max(0, min(view['days_back'], 366))
     view['days_ahead'] = max(0, min(view['days_ahead'], 7))
-    view['site'] = str(view.get('site') or '')
     view['department'] = str(view.get('department') or '')
+    chosen = view.get('tests')
+    view['tests'] = {str(k): str(v or '') for k, v in chosen.items()} if isinstance(chosen, dict) else {}
+
+
+def load_targets():
+    if not os.path.exists(TARGETS_FILE):
+        return
+    try:
+        with open(TARGETS_FILE, 'r', encoding='utf-8') as f:
+            saved = json.load(f)
+    except Exception as e:
+        print(f"[!] Could not read {TARGETS_FILE}: {e}")
+        return
+    if isinstance(saved, dict):
+        targets.update(clean_targets(saved))
+
+
+def save_targets():
+    try:
+        with open(TARGETS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(targets, f, indent=2, sort_keys=True)
+    except Exception as e:
+        print(f"[!] Could not write {TARGETS_FILE}: {e}")
+
+
+def clean_targets(raw):
+    """Minutes per test, keyed the way match_key spells a test name.
+
+    A blank or a nonsense figure drops the test back to the default rather than
+    being kept as a zero — a target of no minutes would fail every sample.
+    """
+    out = {}
+    for name, minutes in raw.items():
+        key = match_key(name)
+        if not key:
+            continue
+        try:
+            value = int(round(float(minutes)))
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            out[key] = min(value, 60 * 24 * 14)
+    return out
+
+
+def target_for(name):
+    return targets.get(match_key(name), DEFAULT_TARGET)
 
 
 def visible_rows():
     """The fetched rows the viewer has asked to see."""
     rows = store['rows']
-    if view['site']:
-        rows = [r for r in rows if text(r, COL_SITE) == view['site']]
     if view['department']:
         rows = [r for r in rows if text(r, COL_DEPARTMENT) == view['department']]
     return rows
@@ -241,12 +314,13 @@ def bucket_for(minutes):
 
 
 def summarise(values):
-    """Median and 90th percentile of a list of numbers, rounded to the minute."""
+    """Average, median and 90th percentile of a list, rounded to the minute."""
     if not values:
-        return {'median': None, 'p90': None, 'count': 0}
+        return {'mean': None, 'median': None, 'p90': None, 'count': 0}
     ordered = sorted(values)
     index = min(len(ordered) - 1, int(round(0.9 * (len(ordered) - 1))))
     return {
+        'mean': round(sum(ordered) / len(ordered)),
         'median': round(statistics.median(ordered)),
         'p90': round(ordered[index]),
         'count': len(ordered),
@@ -260,8 +334,12 @@ def counts_by(rows, col, limit=None):
 
 
 def build_kpis():
-    """Everything the page draws, worked out from the rows now in memory."""
+    """Everything the overview tab draws, from the rows now in memory."""
     rows = visible_rows()
+    # The overview has a test picker of its own, spelled the main report's way.
+    chosen = (view['tests'].get('overview') or '').strip()
+    if chosen:
+        rows = [r for r in rows if text(r, COL_TEST) == chosen]
 
     delays = []            # collection → acceptance, in minutes
     entry_delays = []      # entry (order) → acceptance
@@ -302,6 +380,8 @@ def build_kpis():
         days = [{'label': k, 'value': v} for k, v in sorted(per_day.items())]
 
     return {
+        'tests': sorted({text(r, COL_TEST) for r in visible_rows() if text(r, COL_TEST)}),
+        'test': chosen,
         'totals': {
             'samples': len(rows),
             'patients': len({text(r, COL_MRN) for r in rows if text(r, COL_MRN)}),
@@ -333,6 +413,291 @@ def build_kpis():
     }
 
 
+# ─────────────────────────────────────────────
+# THE FOUR KPI TABS
+# Rejections, critical results, and turnaround split two ways. Each is built
+# from one linked report's own rows rather than from the columns joined onto the
+# samples: those reports carry a row per analyte, and the join keeps only the
+# first of them, which describes the sample but not each test on it.
+#
+# Every tab is narrowed to the samples the main report brought back for the same
+# span — so the department filter above still means something here, and a
+# rejection for a sample outside the span is not counted against it.
+# ─────────────────────────────────────────────
+TABS = {
+    'rejections': {'report': REPORT_REJECTIONS, 'key': 'LIS_SAMPLE_NO', 'test': 'SERVICE_NAME'},
+    'critical': {'report': REPORT_CRITICAL, 'key': 'SAMPLE_NO', 'test': 'TEST_NAME'},
+    'inhouse_tat': {'report': REPORT_STAT, 'key': 'SAMPLE_NO', 'test': 'TEST_NAME'},
+    'referred_tat': {'report': REPORT_RESULT_TIME, 'key': 'LIS_SAMPLE_NO', 'test': 'SERVICE_NAME'},
+}
+
+# How long after the machine had the result somebody signed it off. The lab's
+# own line is a quarter of an hour, which is why fifteen and thirty minutes get
+# counted rather than just charted.
+CRITICAL_LATE = (15, 30)
+CRITICAL_BUCKETS = [
+    ('Under 15 min', 0, 15),
+    ('15–30 min', 15, 30),
+    ('30–60 min', 30, 60),
+    ('1–4h', 60, 240),
+    ('Over 4h', 240, None),
+]
+
+TAT_BUCKETS = [
+    ('Under 30 min', 0, 30),
+    ('30–60 min', 30, 60),
+    ('1–2h', 60, 120),
+    ('2–4h', 120, 240),
+    ('Over 4h', 240, None),
+]
+
+_HMS = re.compile(r'(\d+)\s*(hour|min|sec)', re.I)
+
+
+def parse_hms(value):
+    """Minutes out of the HIS's '0 Hours -23 Minutes -51 Seconds' text.
+
+    Report 1044 hands its turnaround over already worked out, but spelled as
+    words with dashes between the parts. A row the report could not work out
+    comes back as ' Hours  Minutes  Seconds' with the numbers missing, which is
+    not a turnaround of zero and is left out instead.
+    """
+    found = {}
+    for number, unit in _HMS.findall(str(value or '')):
+        found.setdefault(unit.lower(), int(number))
+    if not found:
+        return None
+    return found.get('hour', 0) * 60 + found.get('min', 0) + found.get('sec', 0) / 60.0
+
+
+def bucket_counts(values, buckets):
+    tally = Counter()
+    for minutes in values:
+        for label, low, high in buckets:
+            if minutes >= low and (high is None or minutes < high):
+                tally[label] += 1
+                break
+        else:
+            tally[buckets[-1][0]] += 1
+    return [{'label': label, 'value': tally.get(label, 0)} for label, _, _ in buckets]
+
+
+def classification():
+    """Which samples the lab ran itself, and which it sent on.
+
+    The main report carries two departments: the one the sample belongs to and
+    the one that accepted it. The same on both means the lab ran the test
+    itself; a different one means the sample was referred. Either of them blank
+    says nothing either way, so those samples are left out of both TAT tabs
+    rather than counted as in house by default.
+
+    Two maps come back, because the two TAT reports name tests differently. A
+    sample and test that the main report spells the same way is answered
+    exactly; anything else falls back to the sample, and only when every test on
+    that sample went the same way.
+    """
+    by_sample = defaultdict(set)
+    by_pair = {}
+    for row in visible_rows():
+        sample = text(row, COL_SAMPLE)
+        ours = match_key(text(row, COL_DEPARTMENT))
+        theirs = match_key(text(row, COL_ACCEPT_DEPT))
+        if not sample or not ours or not theirs:
+            continue
+        kind = 'in house' if ours == theirs else 'referred'
+        by_sample[sample].add(kind)
+        by_pair[(sample, match_key(text(row, COL_TEST)))] = kind
+    return by_sample, by_pair
+
+
+def kind_for(maps, sample, test=''):
+    by_sample, by_pair = maps
+    kind = by_pair.get((sample, match_key(test)))
+    if kind:
+        return kind
+    kinds = by_sample.get(sample)
+    if kinds and len(kinds) == 1:
+        return next(iter(kinds))
+    return None
+
+
+def tab_rows(tab):
+    """A tab's report rows, narrowed to the samples on the board and its test.
+
+    Returns the rows, the test names the tab could offer, and the one chosen —
+    the choices are worked out before the filter is applied, or picking a test
+    would leave the dropdown holding only that test.
+    """
+    spec = TABS[tab]
+    samples = {text(r, COL_SAMPLE) for r in visible_rows() if text(r, COL_SAMPLE)}
+    rows = [r for r in (store['linked_rows'].get(spec['report']) or [])
+            if str(column(r, spec['key'], '')).strip() in samples]
+    names = sorted({text(r, spec['test']) for r in rows if text(r, spec['test'])})
+    chosen = (view['tests'].get(tab) or '').strip()
+    if chosen:
+        rows = [r for r in rows if text(r, spec['test']) == chosen]
+    return rows, names, chosen, len(samples)
+
+
+def tab_shell(tab, rows, names, chosen, received, error=None):
+    return {'tab': tab, 'tests': names, 'test': chosen, 'rows': len(rows),
+            'received': received, 'error': error}
+
+
+def linked_error(report):
+    """Whatever went wrong fetching this tab's report, if anything did."""
+    return (store['linked'].get(report) or {}).get('error')
+
+
+def build_rejections():
+    """Samples the lab turned away, and what it said about why."""
+    rows, names, chosen, received = tab_rows('rejections')
+    out = tab_shell('rejections', rows, names, chosen, received,
+                    linked_error(REPORT_REJECTIONS))
+    rejected = {str(column(r, 'LIS_SAMPLE_NO', '')).strip() for r in rows}
+    rejected.discard('')
+    out['totals'] = {
+        'rejected': len(rejected),
+        'lines': len(rows),
+        'received': received,
+        # A rate is only a rate against everything the lab received. Narrow the
+        # tab to one test and the denominator no longer matches the numerator —
+        # the rejection report names services the main report does not — so the
+        # figure is withheld rather than quietly wrong.
+        'rate': (round(100.0 * len(rejected) / received, 2)
+                 if received and not chosen else None),
+    }
+    out['by_reason'] = counts_by(rows, 'REASON')
+    return out
+
+
+def build_critical():
+    """Critical results, and how long they sat between the machine and a name.
+
+    Measured from MACHINE_RESULT_TIME to SECOND_AUTH_DATETIME: the result
+    existed, and then somebody authorised it a second time. Fifteen and thirty
+    minutes are counted out because those are the lines the lab is held to.
+    """
+    rows, names, chosen, received = tab_rows('critical')
+    out = tab_shell('critical', rows, names, chosen, received,
+                    linked_error(REPORT_CRITICAL))
+    delays = []
+    per_test = defaultdict(list)
+    for row in rows:
+        minutes = minutes_between(row, 'MACHINE_RESULT_TIME', 'SECOND_AUTH_DATETIME')
+        if minutes is None:
+            continue
+        delays.append(minutes)
+        per_test[text(row, 'TEST_NAME') or 'Not stated'].append(minutes)
+
+    summary = summarise(delays)
+    out['totals'] = {
+        'results': len(rows),
+        'measured': summary['count'],
+        'mean': summary['mean'],
+        'median': summary['median'],
+        'over_15': sum(1 for m in delays if m > CRITICAL_LATE[0]),
+        'over_30': sum(1 for m in delays if m > CRITICAL_LATE[1]),
+        # Rows whose two stamps the HIS did not both fill in. They are still
+        # critical results; they just cannot be timed.
+        'untimed': len(rows) - summary['count'],
+    }
+    out['buckets'] = bucket_counts(delays, CRITICAL_BUCKETS)
+    out['by_test'] = sorted(
+        ({'label': name,
+          'value': len(values),
+          'mean': summarise(values)['mean'],
+          'median': summarise(values)['median'],
+          'over_15': sum(1 for m in values if m > CRITICAL_LATE[0]),
+          'over_30': sum(1 for m in values if m > CRITICAL_LATE[1])}
+         for name, values in per_test.items()),
+        key=lambda d: d['value'], reverse=True)
+    return out
+
+
+def build_tat(kind):
+    """Turnaround for the samples the lab ran itself, or for those it sent on.
+
+    In house reads the figure report 1044 has already worked out, sorting to
+    result entry. Referred is acceptance to authorisation on report 593, which
+    is where a sample that left the building comes back.
+
+    Each test is measured against its own expected time — the minutes typed in
+    on the tab — so "met" is per test rather than one line drawn across a
+    chemistry panel and a culture alike.
+    """
+    maps = classification()
+    if kind == 'in house':
+        tab, clock = 'inhouse_tat', 'Sorting to result entry (report 1044).'
+    else:
+        tab, clock = 'referred_tat', 'Acceptance to authorisation (report 593).'
+    spec = TABS[tab]
+    rows, names, chosen, received = tab_rows(tab)
+    out = tab_shell(tab, rows, names, chosen, received, linked_error(spec['report']))
+    out['clock'] = clock
+
+    per_test = defaultdict(list)
+    measured = []
+    other_kind = 0     # rows that belong to the other TAT tab
+    unclassified = 0   # samples whose two departments say nothing either way
+    untimed = 0        # rows with no usable turnaround on them
+    for row in rows:
+        sample = str(column(row, spec['key'], '')).strip()
+        name = text(row, spec['test'])
+        theirs = kind_for(maps, sample, name)
+        if theirs is None:
+            unclassified += 1
+            continue
+        if theirs != kind:
+            other_kind += 1
+            continue
+        if kind == 'in house':
+            minutes = parse_hms(column(row, 'TAT_SORT_TO_RESULT_ENTRY'))
+        else:
+            minutes = minutes_between(row, 'SAMPLE_ACCEPTANCE_TIME', 'AUTHORIZATION_DATE')
+        if minutes is None:
+            untimed += 1
+            continue
+        measured.append(minutes)
+        per_test[name or 'Not stated'].append(minutes)
+
+    summary = summarise(measured)
+    met = sum(1 for name, values in per_test.items()
+              for m in values if m <= target_for(name))
+    out['totals'] = {
+        'measured': summary['count'],
+        'tests': len(per_test),
+        'mean': summary['mean'],
+        'median': summary['median'],
+        'met': met,
+        'met_pct': round(100.0 * met / summary['count'], 1) if summary['count'] else None,
+        'other_kind': other_kind,
+        'unclassified': unclassified,
+        'untimed': untimed,
+    }
+    out['buckets'] = bucket_counts(measured, TAT_BUCKETS)
+    out['by_test'] = sorted(
+        ({'label': name,
+          'value': len(values),
+          'mean': summarise(values)['mean'],
+          'median': summarise(values)['median'],
+          'target': target_for(name),
+          'met': sum(1 for m in values if m <= target_for(name)),
+          'met_pct': round(100.0 * sum(1 for m in values if m <= target_for(name))
+                           / len(values), 1)}
+         for name, values in per_test.items()),
+        key=lambda d: d['value'], reverse=True)
+    return out
+
+
+def build_tabs():
+    return {
+        'rejections': build_rejections(),
+        'critical': build_critical(),
+        'inhouse_tat': build_tat('in house'),
+        'referred_tat': build_tat('referred'),
+    }
+
 def choices():
     """The sites and departments the fetched rows actually contain.
 
@@ -341,7 +706,6 @@ def choices():
     that no longer exist.
     """
     return {
-        'sites': sorted({text(r, COL_SITE) for r in store['rows'] if text(r, COL_SITE)}),
         'departments': sorted({text(r, COL_DEPARTMENT) for r in store['rows']
                                if text(r, COL_DEPARTMENT)}),
     }
@@ -350,6 +714,9 @@ def choices():
 def dashboard_payload():
     return {
         'kpis': build_kpis(),
+        'tabs': build_tabs(),
+        'targets': dict(targets),
+        'default_target': DEFAULT_TARGET,
         'choices': choices(),
         'view': dict(view),
         'range': {'from': store['from'], 'to': store['to']},
@@ -511,6 +878,7 @@ def join_linked_reports(rows, date_from, date_to, generation=None):
     per-analyte result on a report that is joined by sample.
     """
     joined = {}
+    kept = {}
     index = defaultdict(list)
     for row in rows:
         key = text(row, COL_SAMPLE)
@@ -533,8 +901,12 @@ def join_linked_reports(rows, date_from, date_to, generation=None):
             # One report being unavailable should not cost the whole board.
             print(f"[!] Linked report {name} failed: {e}")
             joined[name] = {'rows': 0, 'matched': 0, 'ambiguous': 0, 'error': str(e)}
+            kept[name] = []
             continue
 
+        # The tabs read these rows directly: the join below keeps one row per
+        # sample, which is the sample's story but not each analyte's.
+        kept[name] = extra
         matched = 0
         ambiguous = 0
         taken = {}   # id(main row) → the linked row already written onto it
@@ -581,7 +953,7 @@ def join_linked_reports(rows, date_from, date_to, generation=None):
         print(f"[*] Linked {name}: {len(extra)} rows, {matched} matched a sample"
               + (f", {ambiguous} could not be told apart" if ambiguous else ""))
 
-    return joined
+    return joined, kept
 
 
 def stop_check(generation):
@@ -641,6 +1013,7 @@ def his_fetch_once():
         store['from'] = date_from
         store['to'] = date_to
         store['linked'] = {}
+        store['linked_rows'] = {}
         store['progress'] = {'active': True, 'done': 0, 'total': 0, 'cached': 0,
                              'fetched': 0, 'rows': 0, 'partial': True,
                              'phase': 'reading the report'}
@@ -652,7 +1025,7 @@ def his_fetch_once():
                 on_progress=lambda p: note_progress(p, 'reading the report'),
                 should_stop=stopped,
             )
-            linked = join_linked_reports(rows, date_from, date_to, generation)
+            linked, linked_rows = join_linked_reports(rows, date_from, date_to, generation)
             complete = True
         finally:
             his['fetching'] = False
@@ -664,6 +1037,7 @@ def his_fetch_once():
 
     store['fetched_at'] = datetime.now().isoformat()
     store['linked'] = linked
+    store['linked_rows'] = linked_rows
 
     his['last_fetch'] = store['fetched_at']
     his['last_rows'] = len(rows)
@@ -870,6 +1244,11 @@ def api_view():
             continue
         if key in ('days_back', 'days_ahead') and str(data[key]) != str(view[key]):
             moved = True
+        if key == 'tests' and isinstance(data[key], dict):
+            # One tab's test at a time, so choosing on the rejections tab does
+            # not clear what the TAT tabs are showing.
+            view['tests'].update(data[key])
+            continue
         view[key] = data[key]
     clean_view()
     save_view()
@@ -879,6 +1258,31 @@ def api_view():
     if moved and his['logged_in']:
         background(fetch_and_report)
     return jsonify({'ok': True, 'view': dict(view), 'refetching': moved})
+
+
+@app.route('/api/targets', methods=['GET', 'POST'])
+def api_targets():
+    """The minutes each test is expected to take, typed in on the TAT tabs.
+
+    A POST carries only the tests the viewer edited; a test sent with a blank or
+    a zero is forgotten rather than stored, which is how a test goes back to the
+    default time.
+    """
+    if request.method == 'GET':
+        return jsonify({'targets': dict(targets), 'default_target': DEFAULT_TARGET})
+
+    data = (request.get_json(silent=True) or {}).get('targets') or {}
+    for name, minutes in data.items():
+        key = match_key(name)
+        if not key:
+            continue
+        cleaned = clean_targets({name: minutes})
+        if cleaned:
+            targets.update(cleaned)
+        else:
+            targets.pop(key, None)
+    save_targets()
+    return jsonify({'ok': True, 'targets': dict(targets)})
 
 
 @app.route('/api/dashboard')
@@ -1027,6 +1431,7 @@ if __name__ == '__main__':
 
     load_his_config()
     load_view()
+    load_targets()
 
     if windowed:
         background(_open_window_task, url)

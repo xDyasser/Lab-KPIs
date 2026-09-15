@@ -6,6 +6,10 @@ span they choose, and draws the numbers a lab is actually asked about: how many
 samples came in, how long they waited before somebody accepted them, and where
 the waiting happens.
 
+Five more reports are fetched alongside it and joined on by sample number, which
+is what the four KPI tabs — rejections, critical results, and turnaround split
+between the work the lab ran itself and the work it sent on — are built from.
+
 Sibling of the Pending Authorization dashboard, and it borrows that project's
 hardest-won piece — the sign-in — unchanged.
 
@@ -182,6 +186,70 @@ after each fetch.
 Nothing else needs changing to *fetch* a linked report. Putting its columns on
 the board is a change to `build_kpis()` in `app.py`.
 
+## The tabs
+
+Five boards over the same fetched span. The **Overview** is the original one:
+samples received, how long they waited, and where. The other four are one linked
+report each.
+
+| Tab | Built from | What it measures |
+|---|---|---|
+| Rejections | 957, `sample_rejections` | Samples the lab turned away, as a count and as a share of the samples received, and every reason it recorded |
+| Critical results | 362, `critical_results` | `MACHINE_RESULT_TIME` → `SECOND_AUTH_DATETIME`: average, median, and how many took longer than fifteen and thirty minutes |
+| Referred TAT | 593, `result_time` | `SAMPLE_ACCEPTANCE_TIME` → `AUTHORIZATION_DATE` for samples the lab sent on |
+| In-house TAT | 1044, `stat_tests` | `TAT_SORT_TO_RESULT_ENTRY` — sorting to result entry, already worked out by the HIS — for samples the lab ran itself |
+
+The main report is not a source of figures on these tabs. It is there to say
+**which sample numbers count**: the other five reports carry no department, so
+the only way to show one department's rejections or one department's turnaround
+is to take the sample numbers the main report gives for that department and keep
+the rows that match. Nothing else about a sample is carried across.
+
+Each tab reads its report's **own rows** rather than the columns joined onto the
+samples. A rejection or a critical result is a row per analyte and the join keeps
+only the first of them (see *Adding another report*), which describes the sample
+but not each test on it. Every tab is still narrowed to the samples the main
+report brought back for the same span, so a rejection recorded against a sample
+outside the range is not counted against it, and the Department filter above
+reaches all five tabs.
+
+### In house or referred
+
+The main report carries two departments: `DEPARTMENT_NAME`, the department the
+sample belongs to, and `DEPARTMENT_SAMPLE_ACCEPTANCE_BY`, the one that accepted
+it. The same on both means the lab ran the test itself; a different one means
+the sample was referred.
+
+The two TAT reports do not name tests the same way the main report does, so the
+lookup is tried twice: exactly, by sample and test, and then by sample alone —
+and only when every test on that sample went the same way. A sample either
+department is blank on says nothing either way. Rows that could not be placed
+are counted and printed under the tiles rather than quietly folded into one side
+or the other, along with rows whose turnaround the HIS left blank (report 1044
+returns those as `" Hours  Minutes  Seconds"`, which is not a turnaround of
+zero).
+
+### Expected times
+
+Both TAT tabs measure each test against its own expected time, typed into the
+**By test** table at the foot of the tab and saved to `data/targets.json`. One
+list, shared by both tabs; a test nobody has set a time for is held to 60
+minutes. That is what the *Met expected time* tile counts.
+
+### Filtering by test
+
+Each tab keeps its own test picker, because each is a different report and they
+do not spell a test the same way — `SERVICE_NAME` on the rejections, `TEST_NAME`
+on the STAT report, the analyte rather than the test on the critical results.
+The names offered are the ones that tab's rows actually contain, and choosing on
+one tab leaves the others where they were. Filtering costs no fetch: it is the
+rows already in memory being read again.
+
+One figure is withheld under a test filter — the rejection **rate**. Its
+denominator is every sample received, which is not the same population as one
+service's rejections, so the tab says so rather than showing a number that looks
+right and is not.
+
 ## History
 
 There is no local database. The span the viewer picks is what the HIS is asked
@@ -264,8 +332,8 @@ Each chart is one series, so its title names it and no legend is needed. The one
 ordered scale is the wait-before-acceptance chart, which darkens with the wait
 along a single blue ramp; everything else is the same blue. Status (the tick and
 the warning triangle on the tiles) always carries an icon and a word, never
-colour alone. **Table view** in the filter row prints every chart as numbers.
-Both light and dark are chosen, not flipped.
+colour alone. **Table view** in the filter row prints every chart on the
+Overview as numbers. Both light and dark are chosen, not flipped.
 
 ## Running
 
@@ -296,5 +364,5 @@ bundled with `templates/` and `static/`.
 - **Its own icon.** `static/icon.png` is currently the Pending dashboard's, so
   the two look identical in the taskbar. It wants a mark of its own, and the
   build has no `--icon` yet.
-- **The linked reports themselves** — the joining is built and waiting; no second
-  report has been captured yet.
+- **A per-report switch.** Six reports is six passes over the span, and there is
+  no way to turn one off short of taking its file out of `reports/`.

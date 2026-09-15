@@ -129,6 +129,21 @@ button.primary:hover:not(:disabled) { filter: brightness(1.06); background: var(
 .segmented button[aria-pressed="true"] { background: var(--series); color: #fff; font-weight: 600; }
 .filters label { font-size: 12px; color: var(--muted); }
 
+/* ── tabs: one board per KPI, all over the same fetched rows ── */
+.tabs {
+  display: flex; gap: 2px; overflow-x: auto;
+  padding: 0 14px; background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.tabs button {
+  border: 0; border-radius: 0; background: transparent;
+  color: var(--ink-2); font-size: 13px; white-space: nowrap;
+  padding: 10px 12px; border-bottom: 2px solid transparent;
+}
+.tabs button[aria-selected="true"] {
+  color: var(--ink); font-weight: 600; border-bottom-color: var(--series);
+}
+
 /* ── the progress strip ──────────────────────────────────
    A year is fetched a week at a time and takes minutes, so the board says how
    far along it is. Text first — the bar underneath is the same news in a
@@ -193,6 +208,9 @@ th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--gri
 th { color: var(--muted); font-weight: 600; }
 td.num { text-align: right; font-variant-numeric: tabular-nums; }
 td.wrap { white-space: normal; min-width: 240px; }
+input.target { width: 90px; padding: 3px 6px; font-size: 12.5px; text-align: right; }
+.card .actions { margin-top: 12px; display: flex; align-items: center; gap: 10px; }
+.card .actions .said { font-size: 12px; color: var(--muted); }
 
 /* ── tooltip ─────────────────────────────────────────── */
 #tip {
@@ -248,6 +266,14 @@ details.advanced summary { font-size: 12px; color: var(--muted); cursor: pointer
   <button id="refresh" type="button">Refresh</button>
 </header>
 
+<nav class="tabs" id="tabs" role="tablist" aria-label="Boards">
+  <button type="button" role="tab" data-tab="overview" aria-selected="true">Overview</button>
+  <button type="button" role="tab" data-tab="rejections" aria-selected="false">Rejections</button>
+  <button type="button" role="tab" data-tab="critical" aria-selected="false">Critical results</button>
+  <button type="button" role="tab" data-tab="referred_tat" aria-selected="false">Referred TAT</button>
+  <button type="button" role="tab" data-tab="inhouse_tat" aria-selected="false">In-house TAT</button>
+</nav>
+
 <div class="filters">
   <label for="rangeSeg">Range</label>
   <div class="segmented" id="rangeSeg" role="group" aria-label="Date range">
@@ -257,10 +283,12 @@ details.advanced summary { font-size: 12px; color: var(--muted); cursor: pointer
     <button type="button" data-days="89">90 days</button>
     <button type="button" data-days="364">1 year</button>
   </div>
-  <label for="siteSel">Site</label>
-  <select id="siteSel"><option value="">All sites</option></select>
   <label for="deptSel">Department</label>
   <select id="deptSel"><option value="">All departments</option></select>
+  <!-- One test at a time, remembered per tab: each tab is a different report
+       and they do not spell a test the same way. -->
+  <label for="testSel" id="testLabel">Test</label>
+  <select id="testSel"><option value="">All tests</option></select>
   <span class="spacer"></span>
   <button id="tableToggle" type="button" aria-pressed="false">Table view</button>
 </div>
@@ -368,7 +396,8 @@ details.advanced summary { font-size: 12px; color: var(--muted); cursor: pointer
 /* ───────────────────────────────────────────────────────────
    State
    ─────────────────────────────────────────────────────────── */
-let state = { dashboard: null, his: null, tableView: false };
+let state = { dashboard: null, his: null, tableView: false, tab: 'overview',
+              targetsSaved: 0 };
 
 const $  = (id) => document.getElementById(id);
 const el = (tag, attrs = {}, kids = []) => {
@@ -695,9 +724,31 @@ window.addEventListener('resize', () => {
   resizeTimer = setTimeout(drawCharts, 150);
 });
 
+/* Which tab is showing decides the tiles and the charts. Everything else on
+   the page — the range, the department, the progress strip — is the same on all
+   five, and is drawn by renderChrome below. */
 function render() {
   const data = state.dashboard;
   if (!data) return;
+  // The board redraws itself every few seconds. Somebody typing an expected
+  // time into the TAT table would have it taken out from under them mid-number,
+  // so a redraw waits until they have finished with the box.
+  if (document.activeElement && document.activeElement.classList.contains('target')) return;
+  pending.length = 0;
+  $('tiles').replaceChildren();
+  $('charts').replaceChildren();
+
+  const tabs = data.tabs || {};
+  if (state.tab === 'overview') renderOverview(data);
+  else if (state.tab === 'rejections') renderRejections(tabs.rejections);
+  else if (state.tab === 'critical') renderCritical(tabs.critical);
+  else renderTat(tabs[state.tab]);
+
+  drawCharts();
+  renderChrome(data);
+}
+
+function renderOverview(data) {
   const k = data.kpis;
 
   // ── tiles ──
@@ -716,9 +767,6 @@ function render() {
 
   // ── charts ──
   const charts = $('charts');
-  charts.replaceChildren();
-  pending.length = 0;
-
   const days = k.per_day;
   charts.appendChild(card('Samples received per day',
     `${data.range.from || ''} to ${data.range.to || ''}`,
@@ -783,12 +831,31 @@ function render() {
   }
 
   if (state.tableView) charts.appendChild(tableView(k));
+}
 
-  drawCharts();
+/* The tests the tab showing can offer, and the one it is on. Each tab keeps its
+   own pick, because the reports behind them name tests differently. */
+function tabTests(data) {
+  if (state.tab === 'overview') return { list: data.kpis.tests || [], chosen: data.kpis.test || '' };
+  const t = (data.tabs || {})[state.tab] || {};
+  return { list: t.tests || [], chosen: t.test || '' };
+}
 
-  // ── filter choices, without losing what is selected ──
-  fillSelect($('siteSel'), data.choices.sites, data.view.site, 'All sites');
+/* Everything outside the tiles and charts: the same on whichever tab. */
+function renderChrome(data) {
+  for (const btn of $('tabs').children)
+    btn.setAttribute('aria-selected', String(btn.dataset.tab === state.tab));
+
   fillSelect($('deptSel'), data.choices.departments, data.view.department, 'All departments');
+  const tests = tabTests(data);
+  fillSelect($('testSel'), tests.list, tests.chosen, 'All tests');
+  // A tab whose report brought back no test names has nothing to pick from,
+  // and an empty dropdown reads as a fault rather than as an absence.
+  const noTests = tests.list.length === 0;
+  $('testSel').hidden = noTests;
+  $('testLabel').hidden = noTests;
+  $('tableToggle').hidden = state.tab !== 'overview';
+
   for (const btn of $('rangeSeg').children)
     btn.setAttribute('aria-pressed', String(Number(btn.dataset.days) === data.view.days_back));
 
@@ -797,6 +864,200 @@ function render() {
     : '';
 
   renderProgress(data.progress || {});
+}
+
+/* ───────────────────────────────────────────────────────────
+   The four KPI tabs
+   Each is one linked report, over the same samples the overview
+   is showing — so the department filter still means something
+   here, and a rejection for a sample outside the span is not
+   counted against it.
+   ─────────────────────────────────────────────────────────── */
+const pct = (v) => (v === null || v === undefined) ? '—' : v.toFixed(1) + '%';
+
+function noteCard(message) {
+  const node = el('div', { class: 'card wide' });
+  node.appendChild(el('p', { class: 'sub', style: 'margin:0', text: message }));
+  return node;
+}
+
+/** A card holding nothing but a table. */
+function tableCard(title, sub, headings, rows) {
+  const node = el('div', { class: 'card wide' });
+  node.appendChild(el('h2', { text: title }));
+  if (sub) node.appendChild(el('p', { class: 'sub', text: sub }));
+  const wrap = el('div', { class: 'table-wrap' });
+  const table = el('table');
+  const head = el('tr');
+  for (const h of headings) head.appendChild(el('th', { text: h }));
+  table.appendChild(el('thead', {}, [head]));
+  const body = el('tbody');
+  for (const cells of rows) {
+    const tr = el('tr');
+    for (const cell of cells) tr.appendChild(cell);
+    body.appendChild(tr);
+  }
+  table.appendChild(body);
+  wrap.appendChild(table);
+  node.appendChild(wrap);
+  return node;
+}
+
+const cell = (value, cls) => el('td', { class: cls || null, text: value });
+
+function renderRejections(t) {
+  if (!t) return;
+  const charts = $('charts');
+  const n = t.totals;
+  $('tiles').replaceChildren(
+    tile('Samples rejected', fmt(n.rejected), '',
+         `of ${fmt(n.received)} samples received in this range`),
+    tile('Rejection rate', n.rate === null ? '—' : n.rate.toFixed(2) + '%', '',
+         n.rate === null
+           ? 'Only shown across every test — the rejection report names services the main report does not.'
+           : 'Rejected samples ÷ samples received'),
+    tile('Tests turned away', fmt(n.lines), '',
+         'A sample rejected for four tests is counted four times here'),
+  );
+  if (t.error) charts.appendChild(noteCard('The rejection report did not answer: ' + t.error));
+  charts.appendChild(card('Why samples were rejected',
+    'Every reason the lab recorded, biggest first.',
+    (width) => hbar(t.by_reason, { width, labelWidth: 260, unit: 'rejections',
+                                   label: 'Rejections by reason' }), true));
+}
+
+function renderCritical(t) {
+  if (!t) return;
+  const charts = $('charts');
+  const n = t.totals;
+  const share = (count) => n.measured ? ` · ${(100 * count / n.measured).toFixed(1)}% of those timed` : '';
+  $('tiles').replaceChildren(
+    tile('Critical results', fmt(n.results), '',
+         n.untimed ? `${fmt(n.untimed)} could not be timed — a stamp was missing` : 'All of them timed'),
+    tile('Average to authorise', duration(n.mean), '', `machine result to second authorisation`),
+    tile('Median to authorise', duration(n.median), '', `of ${fmt(n.measured)} results`),
+    tile('Over 15 minutes', fmt(n.over_15), '', 'late' + share(n.over_15)),
+    tile('Over 30 minutes', fmt(n.over_30), '', 'late' + share(n.over_30)),
+  );
+  if (t.error) charts.appendChild(noteCard('The critical results report did not answer: ' + t.error));
+  charts.appendChild(card('How long the authorisation took',
+    'Machine result to second authorisation. Darker is longer.',
+    (width) => hbar(t.buckets, { width, ramp: true, labelWidth: 120, unit: 'results',
+                                 label: 'Time to second authorisation' })));
+  charts.appendChild(tableCard('By test',
+    'Which tests wait longest between the machine and a name.',
+    ['Test', 'Results', 'Average', 'Median', 'Over 15 min', 'Over 30 min'],
+    t.by_test.map((r) => [
+      el('td', { class: 'wrap', text: clip(r.label, 60) }),
+      cell(fmt(r.value), 'num'),
+      cell(duration(r.mean), 'num'),
+      cell(duration(r.median), 'num'),
+      cell(fmt(r.over_15), 'num'),
+      cell(fmt(r.over_30), 'num'),
+    ])));
+}
+
+function renderTat(t) {
+  if (!t) return;
+  const charts = $('charts');
+  const n = t.totals;
+  $('tiles').replaceChildren(
+    tile('Tests measured', fmt(n.measured), '',
+         `${fmt(n.tests)} distinct test${n.tests === 1 ? '' : 's'}`),
+    tile('Average', duration(n.mean), '', t.clock),
+    tile('Median', duration(n.median), '', t.clock),
+    tile('Met expected time', pct(n.met_pct), '',
+         `${fmt(n.met)} of ${fmt(n.measured)} within the time set for their test`),
+  );
+  if (t.error) charts.appendChild(noteCard('This tab\u2019s report did not answer: ' + t.error));
+
+  // What was left out, and why. A turnaround figure that quietly drops a third
+  // of its rows is worse than one that says it did.
+  const aside = [];
+  if (n.other_kind) aside.push(`${fmt(n.other_kind)} belong to the other tab`);
+  if (n.unclassified) aside.push(`${fmt(n.unclassified)} could not be told apart — a department was blank`);
+  if (n.untimed) aside.push(`${fmt(n.untimed)} had no usable time on them`);
+  if (aside.length) charts.appendChild(noteCard('Set aside: ' + aside.join(' · ') + '.'));
+
+  charts.appendChild(card('How long the tests took', t.clock + ' Darker is longer.',
+    (width) => hbar(t.buckets, { width, ramp: true, labelWidth: 120, unit: 'tests',
+                                 label: 'Turnaround' })));
+  charts.appendChild(targetsTable(t));
+}
+
+/** By test, with the expected time editable in place.
+ *
+ *  One list of times, shared by both TAT tabs and kept on this PC. A test left
+ *  blank falls back to the default rather than being held to no minutes at all. */
+function targetsTable(t) {
+  const fallback = (state.dashboard.default_target || 60);
+  const node = el('div', { class: 'card wide' });
+  node.appendChild(el('h2', { text: 'By test, against its expected time' }));
+  node.appendChild(el('p', { class: 'sub', text:
+    `Type the minutes a test is expected to take and save. Blank puts it back to the default of ${fallback} minutes. The times are shared by both TAT tabs.` }));
+
+  const wrap = el('div', { class: 'table-wrap' });
+  const table = el('table');
+  const head = el('tr');
+  for (const h of ['Test', 'Tests', 'Average', 'Median', 'Expected (min)', 'Met'])
+    head.appendChild(el('th', { text: h }));
+  table.appendChild(el('thead', {}, [head]));
+  const body = el('tbody');
+  const inputs = [];
+  for (const r of t.by_test) {
+    const tr = el('tr');
+    tr.appendChild(el('td', { class: 'wrap', text: clip(r.label, 60) }));
+    tr.appendChild(cell(fmt(r.value), 'num'));
+    tr.appendChild(cell(duration(r.mean), 'num'));
+    tr.appendChild(cell(duration(r.median), 'num'));
+    const box = el('input', { class: 'target', type: 'number', min: '1', step: '1',
+                              value: r.target, 'aria-label': `Expected minutes for ${r.label}` });
+    inputs.push([r.label, box]);
+    const td = el('td', { class: 'num' });
+    td.appendChild(box);
+    tr.appendChild(td);
+    tr.appendChild(cell(`${fmt(r.met)} · ${pct(r.met_pct)}`, 'num'));
+    body.appendChild(tr);
+  }
+  table.appendChild(body);
+  wrap.appendChild(table);
+  node.appendChild(wrap);
+
+  if (!t.by_test.length) {
+    node.appendChild(emptyNote('No tests to measure in this range.'));
+    return node;
+  }
+
+  // Saving redraws the whole card, so the confirmation has to outlive the node
+  // that showed it or nothing would ever appear to happen.
+  const fresh = state.targetsSaved && (Date.now() - state.targetsSaved) < 5000;
+  const said = el('span', { class: 'said', text: fresh ? 'Saved.' : '' });
+  const save = el('button', { class: 'primary', type: 'button', text: 'Save expected times' });
+  // A box still focused would hold off the redraw that shows the new figures.
+  const box_blur = () => { for (const [, box] of inputs) box.blur(); };
+
+  save.addEventListener('click', async () => {
+    save.disabled = true;
+    said.textContent = 'Saving…';
+    const payload = {};
+    for (const [name, box] of inputs) payload[name] = box.value;
+    try {
+      await api('/api/targets', { targets: payload });
+      state.targetsSaved = Date.now();
+      said.textContent = 'Saved.';
+      box_blur();
+      await pull();
+    } catch (e) {
+      said.textContent = e.message;
+    } finally {
+      save.disabled = false;
+    }
+  });
+  const actions = el('div', { class: 'actions' });
+  actions.appendChild(save);
+  actions.appendChild(said);
+  node.appendChild(actions);
+  return node;
 }
 
 /** How far through a wide span the fetch has got.
@@ -1019,12 +1280,24 @@ $('rangeSeg').addEventListener('click', async (evt) => {
   await pull();
 });
 
-for (const [id, key] of [['siteSel', 'site'], ['deptSel', 'department']]) {
-  $(id).addEventListener('change', async () => {
-    await api('/api/view', { [key]: $(id).value });
-    await pull();
-  });
-}
+$('deptSel').addEventListener('change', async () => {
+  await api('/api/view', { department: $('deptSel').value });
+  await pull();
+});
+
+// The test is remembered per tab, so moving between tabs does not carry one
+// report's spelling of a test onto another's list.
+$('testSel').addEventListener('change', async () => {
+  await api('/api/view', { tests: { [state.tab]: $('testSel').value } });
+  await pull();
+});
+
+$('tabs').addEventListener('click', (evt) => {
+  const btn = evt.target.closest('button');
+  if (!btn || btn.dataset.tab === state.tab) return;
+  state.tab = btn.dataset.tab;
+  render();
+});
 
 $('tableToggle').addEventListener('click', () => {
   state.tableView = !state.tableView;
