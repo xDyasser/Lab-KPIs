@@ -12,4 +12,9 @@ pyinstaller --onefile --name LabKPIs ^
 
 echo.
 echo Built dist\LabKPIs.exe
-pause
+
+REM Wait for a keypress when a person ran this by double-clicking, so the
+REM window does not vanish before they read it. CI is always set on a runner
+REM and never set on a desktop, so the workflow runs this same script without
+REM sitting on a prompt nobody can answer.
+if not defined CI pause
